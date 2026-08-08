@@ -18,6 +18,21 @@ def test_parse_social_news_notification_from_screenshot_shape():
     assert "Market Maps" in parsed.body
 
 
+def test_parse_winrt_social_news_payload():
+    parsed = parse_uia_texts(
+        [
+            "Discord",
+            "\ufeffTrendVision (#social-news, Trend Vision Scanner)",
+            "Prices of all food categories are up 29%, per CNBC",
+        ]
+    )
+
+    assert parsed is not None
+    assert parsed.channel == "social-news"
+    assert parsed.title == "Prices of all food categories are up 29%, per CNBC"
+    assert parsed.ticker is None
+
+
 def test_parse_scanner_ticker():
     parsed = parse_uia_texts(
         [
@@ -39,7 +54,6 @@ def test_requires_trendvision():
 
 
 def test_rejects_non_discord_window_containing_project_name():
-    # Regression test for the VS Code false positive found during the first live test.
     assert (
         parse_uia_texts(
             [
@@ -54,8 +68,6 @@ def test_rejects_non_discord_window_containing_project_name():
 
 
 def test_rejects_discord_text_without_real_scanner_header():
-    # Even if another desktop window happens to contain the word Discord, it
-    # should not be captured unless it also contains the scanner toast header.
     assert (
         parse_uia_texts(
             [
