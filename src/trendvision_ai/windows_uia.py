@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import re
 import time
 from collections.abc import Callable, Iterable
 
@@ -8,6 +9,7 @@ from .models import CapturedNotification
 from .parser import parse_uia_texts
 
 LOGGER = logging.getLogger(__name__)
+_TRENDVISION_HEADER_RE = re.compile(r"^trendvision\s*\(#", re.IGNORECASE)
 
 
 def _load_pywinauto():
@@ -80,35 +82,54 @@ def _window_debug_description(window) -> str:
     return ", ".join(parts) or "<metadata unavailable>"
 
 
-def _relevant_debug_lines(texts: list[str], limit: int = 8) -> str:
-    """Return a tiny useful sample instead of dumping an entire browser UI tree."""
-    relevant = [
-        " ".join(text.split())
-        for text in texts
-        if "discord" in text.casefold() or "trendvision" in text.casefold()
-    ]
-    if not relevant:
-        relevant = [" ".join(text.split()) for text in texts[:3]]
-    return " | ".join(relevant[:limit])
+def _element_identity(window) -> str:
+    try:
+        runtime_id = getattr(window.element_info, "runtime_id", None)
+        if runtime_id:
+            return f"runtime:{tuple(runtime_id)}"
+    except Exception:
+        pass
+
+    try:
+        return f"handle:{int(window.handle)}"
+    except Exception:
+        return f"object:{id(window)}"
+
+
+def _top_level_class(window) -> str:
+    try:
+        return window.top_level_parent().class_name() or ""
+    except Exception:
+        return ""
+
+
+def _is_obvious_app_tree(window) -> bool:
+    """Ignore browser/VS Code/Discord Electron trees during toast discovery."""
+    top_class = _top_level_class(window).casefold()
+    own_class = ""
+    try:
+        own_class = (window.class_name() or "").casefold()
+    except Exception:
+        pass
+
+    noisy_markers = ("chrome_widgetwin", "monaco-")
+    return any(marker in top_class or marker in own_class for marker in noisy_markers)
 
 
 def _has_notification_signature(texts: list[str]) -> bool:
     lowered = [text.strip().casefold() for text in texts]
-    has_discord = any("discord" in text for text in lowered)
-    has_trendvision = any("trendvision" in text for text in lowered)
-    return has_discord and has_trendvision
+    has_discord = any(text == "discord" or text.startswith("discord notification") for text in lowered)
+    has_trendvision_header = any(_TRENDVISION_HEADER_RE.match(text.strip()) for text in texts)
+    return has_discord and has_trendvision_header
 
 
 def _looks_like_discord_toast(window, texts: list[str]) -> bool:
-    """Reject ordinary app/browser windows before parsing a notification."""
     if not _has_notification_signature(texts):
         return False
-
-    # A real toast should expose only a small accessibility subtree. This
-    # rejects VS Code/browser windows that happen to display our own docs/chat.
-    if len(texts) > 60:
+    if _is_obvious_app_tree(window):
         return False
-    if sum(len(text) for text in texts) > 6500:
+
+    if len(texts) > 60 or sum(len(text) for text in texts) > 6500:
         return False
 
     geometry = _window_geometry(window)
@@ -118,30 +139,7 @@ def _looks_like_discord_toast(window, texts: list[str]) -> bool:
     width, height = geometry
     if width <= 0 or height <= 0:
         return False
-
-    # Generous limits for DPI scaling. The user's real toast is much smaller.
-    if width > 1200 or height > 950:
-        return False
-
-    return True
-
-
-def _element_identity(window) -> str:
-    """Best-effort identity used only to avoid scanning the same surface twice."""
-    try:
-        info = window.element_info
-        runtime_id = getattr(info, "runtime_id", None)
-        if runtime_id:
-            return f"runtime:{tuple(runtime_id)}"
-    except Exception:
-        pass
-
-    try:
-        return f"handle:{int(window.handle)}"
-    except Exception:
-        pass
-
-    return f"object:{id(window)}"
+    return width <= 1200 and height <= 950
 
 
 def _walk_ancestors(element_info, max_levels: int = 12) -> Iterable[object]:
@@ -156,18 +154,18 @@ def _walk_ancestors(element_info, max_levels: int = 12) -> Iterable[object]:
             return
 
 
-def _search_named_elements(find_elements, *, debug: bool):
-    """Find UIA elements that may belong to a Discord/TrendVision toast."""
+def _search_named_elements(find_elements):
+    """Search only names that closely resemble an actual Windows toast."""
     searches = [
-        ("Discord exact", {"title": "Discord"}),
-        ("Discord fuzzy", {"title_re": r"(?i).*discord.*"}),
-        ("TrendVision fuzzy", {"title_re": r"(?i).*trendvision.*"}),
+        {"title": "Discord"},
+        {"title_re": r"(?i)^discord notification.*"},
+        {"title_re": r"(?i)^trendvision\s*\(#.*"},
     ]
 
     found: list[object] = []
-    seen_runtime_ids: set[str] = set()
+    seen: set[str] = set()
 
-    for label, selector in searches:
+    for selector in searches:
         try:
             elements = find_elements(
                 backend="uia",
@@ -175,13 +173,8 @@ def _search_named_elements(find_elements, *, debug: bool):
                 visible_only=True,
                 **selector,
             )
-        except Exception as exc:
-            if debug:
-                LOGGER.debug("UIA search %s failed: %s", label, exc)
+        except Exception:
             continue
-
-        if debug:
-            LOGGER.debug("UIA search %s found %d visible element(s).", label, len(elements))
 
         for element in elements:
             try:
@@ -189,16 +182,15 @@ def _search_named_elements(find_elements, *, debug: bool):
                 identity = f"runtime:{tuple(runtime_id)}" if runtime_id else f"object:{id(element)}"
             except Exception:
                 identity = f"object:{id(element)}"
-            if identity in seen_runtime_ids:
+            if identity in seen:
                 continue
-            seen_runtime_ids.add(identity)
+            seen.add(identity)
             found.append(element)
 
     return found
 
 
-def _discover_candidate_surfaces(desktop, UIAWrapper, find_elements, *, debug: bool):
-    """Yield possible toast surfaces from top-level and nested Windows UIA trees."""
+def _discover_candidate_surfaces(desktop, UIAWrapper, find_elements):
     yielded: set[str] = set()
 
     try:
@@ -208,23 +200,10 @@ def _discover_candidate_surfaces(desktop, UIAWrapper, find_elements, *, debug: b
                 continue
             yielded.add(identity)
             yield window
-    except Exception as exc:
-        LOGGER.debug("Could not enumerate top-level desktop windows: %s", exc)
+    except Exception:
+        pass
 
-    named_elements = _search_named_elements(find_elements, debug=debug)
-
-    for named_element in named_elements:
-        if debug:
-            try:
-                LOGGER.debug(
-                    "Named UIA element: name=%r control_type=%r class=%r",
-                    getattr(named_element, "name", None),
-                    getattr(named_element, "control_type", None),
-                    getattr(named_element, "class_name", None),
-                )
-            except Exception:
-                pass
-
+    for named_element in _search_named_elements(find_elements):
         for ancestor_info in _walk_ancestors(named_element):
             try:
                 surface = UIAWrapper(ancestor_info)
@@ -234,25 +213,20 @@ def _discover_candidate_surfaces(desktop, UIAWrapper, find_elements, *, debug: b
             identity = _element_identity(surface)
             if identity in yielded:
                 continue
+            if _is_obvious_app_tree(surface):
+                continue
+
+            geometry = _window_geometry(surface)
+            if geometry is not None:
+                width, height = geometry
+                if width <= 0 or height <= 0 or width > 1200 or height > 950:
+                    continue
 
             try:
                 texts = _extract_window_texts(surface)
             except Exception:
                 continue
-            if not texts:
-                continue
-
-            if debug and any(
-                ("discord" in text.casefold() or "trendvision" in text.casefold())
-                for text in texts
-            ):
-                LOGGER.debug(
-                    "Ancestor probe (%s) sample=%s",
-                    _window_debug_description(surface),
-                    _relevant_debug_lines(texts),
-                )
-
-            if not _has_notification_signature(texts):
+            if not texts or not _has_notification_signature(texts):
                 continue
 
             yielded.add(identity)
@@ -268,41 +242,30 @@ def listen_for_trendvision_toasts(
     Desktop, UIAWrapper, find_elements = _load_pywinauto()
     desktop = Desktop(backend="uia")
     recently_seen: dict[str, float] = {}
+    debug_seen: dict[str, float] = {}
+    last_debug_heartbeat = 0.0
 
     while True:
         now = time.monotonic()
+        candidate_count = 0
 
-        for window in _discover_candidate_surfaces(
-            desktop,
-            UIAWrapper,
-            find_elements,
-            debug=debug,
-        ):
+        for window in _discover_candidate_surfaces(desktop, UIAWrapper, find_elements):
             try:
                 texts = _extract_window_texts(window)
-            except Exception as exc:
-                LOGGER.debug("Failed reading a UIA surface: %s", exc)
+            except Exception:
                 continue
 
-            if not texts:
+            if not texts or not _looks_like_discord_toast(window, texts):
                 continue
 
-            has_signature = _has_notification_signature(texts)
-
-            if not _looks_like_discord_toast(window, texts):
-                if debug and has_signature:
-                    LOGGER.info(
-                        "Rejected non-toast surface (%s) sample=%s",
-                        _window_debug_description(window),
-                        _relevant_debug_lines(texts),
-                    )
-                continue
-
-            if debug:
+            candidate_count += 1
+            debug_key = _element_identity(window) + "|" + "|".join(texts[:4])
+            if debug and now - debug_seen.get(debug_key, 0.0) > 30:
+                debug_seen[debug_key] = now
                 LOGGER.info(
-                    "Discord TrendVision toast candidate (%s):\n%s",
+                    "Possible Discord toast (%s) sample=%s",
                     _window_debug_description(window),
-                    "\n".join(texts),
+                    " | ".join(texts[:8]),
                 )
 
             parsed = parse_uia_texts(texts)
@@ -313,12 +276,20 @@ def listen_for_trendvision_toasts(
             if last_seen is not None and now - last_seen < 30:
                 continue
             recently_seen[parsed.fingerprint] = now
-
             on_notification(parsed.to_notification())
+
+        if debug and now - last_debug_heartbeat >= 15:
+            LOGGER.debug("UIA listener alive; toast candidates this scan=%d", candidate_count)
+            last_debug_heartbeat = now
 
         recently_seen = {
             fingerprint: seen_at
             for fingerprint, seen_at in recently_seen.items()
+            if now - seen_at < 120
+        }
+        debug_seen = {
+            key: seen_at
+            for key, seen_at in debug_seen.items()
             if now - seen_at < 120
         }
         time.sleep(poll_interval_seconds)
