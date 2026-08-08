@@ -1,0 +1,8 @@
+{
+  "poll_interval_seconds": 0.35,
+  "source_contains": "TrendVision",
+  "app_contains": "Discord",
+  "database_path": "data/trendvision.db",
+  "jsonl_path": "data/raw_notifications.jsonl",
+  "debug_log_path": "logs/uia_debug.log"
+}
