@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import logging
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 
 from .models import CapturedNotification
 from .parser import parse_uia_texts
@@ -13,11 +13,13 @@ LOGGER = logging.getLogger(__name__)
 def _load_pywinauto():
     try:
         from pywinauto import Desktop  # type: ignore
+        from pywinauto.controls.uiawrapper import UIAWrapper  # type: ignore
+        from pywinauto.findwindows import find_elements  # type: ignore
     except ImportError as exc:
         raise RuntimeError(
             "pywinauto is required on Windows. Run scripts\\setup.bat first."
         ) from exc
-    return Desktop
+    return Desktop, UIAWrapper, find_elements
 
 
 def _extract_window_texts(window) -> list[str]:
@@ -74,27 +76,20 @@ def _window_debug_description(window) -> str:
     return ", ".join(parts) or "<metadata unavailable>"
 
 
-def _looks_like_discord_toast(window, texts: list[str]) -> bool:
-    """Reject ordinary app/browser windows before parsing a notification.
-
-    Our first guard only required an exact `Discord` label plus a
-    `TrendVision (#...)` line. A browser showing this ChatGPT conversation can
-    contain both strings, so it still looked like a notification.
-
-    A live Windows toast is a small top-level surface with relatively little
-    accessibility text. Full browser/VS Code windows are much larger and expose
-    hundreds of controls. We therefore require both the Discord/TrendVision
-    signature *and* toast-like geometry/text volume.
-    """
-    has_discord_app_label = any(text.strip().casefold() == "discord" for text in texts)
-    has_trendvision_header = any(
-        text.strip().casefold().startswith("trendvision (#") for text in texts
+def _has_notification_signature(texts: list[str]) -> bool:
+    return (
+        any(text.strip().casefold() == "discord" for text in texts)
+        and any(text.strip().casefold().startswith("trendvision (#") for text in texts)
     )
-    if not (has_discord_app_label and has_trendvision_header):
+
+
+def _looks_like_discord_toast(window, texts: list[str]) -> bool:
+    """Reject ordinary app/browser windows before parsing a notification."""
+    if not _has_notification_signature(texts):
         return False
 
-    # Safety valve: a notification should never expose an entire application's
-    # accessibility tree. This also protects us if window geometry is unusual.
+    # A real toast should expose only a small accessibility subtree. This
+    # rejects VS Code/browser windows that happen to display our own docs/chat.
     if len(texts) > 45:
         return False
     if sum(len(text) for text in texts) > 5000:
@@ -102,20 +97,112 @@ def _looks_like_discord_toast(window, texts: list[str]) -> bool:
 
     geometry = _window_geometry(window)
     if geometry is None:
-        # Unknown geometry is allowed for now because Windows builds differ.
-        # The text-volume checks above still reject the false positives we saw.
         return True
 
     width, height = geometry
     if width <= 0 or height <= 0:
         return False
 
-    # Windows 10/11 toast surfaces are compact. Keep generous limits so DPI
-    # scaling and accessibility settings do not accidentally reject a real one.
-    if width > 1000 or height > 900:
+    # Generous limits for DPI scaling. The user's real toast is much smaller.
+    if width > 1100 or height > 900:
         return False
 
     return True
+
+
+def _element_identity(window) -> str:
+    """Best-effort identity used only to avoid scanning the same surface twice."""
+    try:
+        info = window.element_info
+        runtime_id = getattr(info, "runtime_id", None)
+        if runtime_id:
+            return f"runtime:{tuple(runtime_id)}"
+    except Exception:
+        pass
+
+    try:
+        return f"handle:{int(window.handle)}"
+    except Exception:
+        pass
+
+    return f"object:{id(window)}"
+
+
+def _walk_ancestors(element_info, max_levels: int = 9) -> Iterable[object]:
+    current = element_info
+    for _ in range(max_levels):
+        if current is None:
+            return
+        yield current
+        try:
+            current = current.parent
+        except Exception:
+            return
+
+
+def _discover_candidate_surfaces(desktop, UIAWrapper, find_elements, *, debug: bool):
+    """Yield possible toast surfaces.
+
+    Windows notifications are not guaranteed to appear as independent
+    top-level windows. On some Windows builds a toast is a nested UI Automation
+    subtree owned by the shell. The original prototype only called
+    ``desktop.windows()`` and therefore missed a real notification on the
+    user's machine.
+
+    We now use two discovery paths:
+      1. ordinary top-level UIA windows;
+      2. any visible UIA element whose exact accessible name is ``Discord``,
+         then walk upward through its ancestors looking for the compact parent
+         that also contains the ``TrendVision (#channel, ...)`` header.
+    """
+    yielded: set[str] = set()
+
+    try:
+        for window in desktop.windows():
+            identity = _element_identity(window)
+            if identity in yielded:
+                continue
+            yielded.add(identity)
+            yield window
+    except Exception as exc:
+        LOGGER.debug("Could not enumerate top-level desktop windows: %s", exc)
+
+    try:
+        discord_elements = find_elements(
+            title="Discord",
+            backend="uia",
+            top_level_only=False,
+            visible_only=True,
+        )
+    except Exception as exc:
+        LOGGER.debug("Could not search nested UIA elements for Discord: %s", exc)
+        return
+
+    if debug and discord_elements:
+        LOGGER.debug("Found %d visible UIA element(s) named exactly 'Discord'.", len(discord_elements))
+
+    for discord_element in discord_elements:
+        for ancestor_info in _walk_ancestors(discord_element):
+            try:
+                surface = UIAWrapper(ancestor_info)
+            except Exception:
+                continue
+
+            identity = _element_identity(surface)
+            if identity in yielded:
+                continue
+
+            # Do not mark every ancestor as yielded before we know it is useful;
+            # another Discord-labelled child may lead to the same toast parent.
+            try:
+                texts = _extract_window_texts(surface)
+            except Exception:
+                continue
+            if not texts or not _has_notification_signature(texts):
+                continue
+
+            yielded.add(identity)
+            yield surface
 
 
 def listen_for_trendvision_toasts(
@@ -124,38 +211,34 @@ def listen_for_trendvision_toasts(
     poll_interval_seconds: float = 0.35,
     debug: bool = False,
 ) -> None:
-    Desktop = _load_pywinauto()
+    Desktop, UIAWrapper, find_elements = _load_pywinauto()
     desktop = Desktop(backend="uia")
     recently_seen: dict[str, float] = {}
 
     while True:
         now = time.monotonic()
-        try:
-            windows = desktop.windows()
-        except Exception as exc:
-            LOGGER.debug("Could not enumerate desktop windows: %s", exc)
-            time.sleep(poll_interval_seconds)
-            continue
 
-        for window in windows:
+        for window in _discover_candidate_surfaces(
+            desktop,
+            UIAWrapper,
+            find_elements,
+            debug=debug,
+        ):
             try:
                 texts = _extract_window_texts(window)
             except Exception as exc:
-                LOGGER.debug("Failed reading a UIA window: %s", exc)
+                LOGGER.debug("Failed reading a UIA surface: %s", exc)
                 continue
 
             if not texts:
                 continue
 
-            has_signature = (
-                any(text.strip().casefold() == "discord" for text in texts)
-                and any(text.strip().casefold().startswith("trendvision (#") for text in texts)
-            )
+            has_signature = _has_notification_signature(texts)
 
             if not _looks_like_discord_toast(window, texts):
                 if debug and has_signature:
                     LOGGER.info(
-                        "Rejected Discord/TrendVision window (%s):\n%s",
+                        "Rejected Discord/TrendVision surface (%s):\n%s",
                         _window_debug_description(window),
                         "\n".join(texts[:60]),
                     )
