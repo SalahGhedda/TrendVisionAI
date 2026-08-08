@@ -46,6 +46,21 @@ def _extract_window_texts(window) -> list[str]:
     return texts
 
 
+def _looks_like_discord_toast(texts: list[str]) -> bool:
+    """Cheap guard before parsing the whole candidate.
+
+    The first prototype scanned every desktop window containing the word
+    TrendVision. That caused VS Code/browser windows containing our own project
+    name or chat text to be captured as fake alerts. Real Discord toasts expose
+    both an exact `Discord` app label and the TrendVision scanner header.
+    """
+    has_discord_app_label = any(text.strip().casefold() == "discord" for text in texts)
+    has_trendvision_header = any(
+        text.strip().casefold().startswith("trendvision (#") for text in texts
+    )
+    return has_discord_app_label and has_trendvision_header
+
+
 def listen_for_trendvision_toasts(
     on_notification: Callable[[CapturedNotification], None],
     *,
@@ -72,15 +87,11 @@ def listen_for_trendvision_toasts(
                 LOGGER.debug("Failed reading a UIA window: %s", exc)
                 continue
 
-            if not texts:
-                continue
-
-            joined = "\n".join(texts)
-            if "TrendVision" not in joined:
+            if not texts or not _looks_like_discord_toast(texts):
                 continue
 
             if debug:
-                LOGGER.info("UIA candidate:\n%s", joined)
+                LOGGER.info("Discord TrendVision UIA candidate:\n%s", "\n".join(texts))
 
             parsed = parse_uia_texts(texts)
             if parsed is None:
