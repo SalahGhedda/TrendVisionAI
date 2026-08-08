@@ -15,17 +15,29 @@ _CHANNEL_RE = re.compile(
 )
 _TICKER_RE = re.compile(r"^\s*(?P<ticker>[A-Z][A-Z0-9.\-]{0,7})\b")
 
+# Common scanner headings/labels that can appear before the real symbol. Keep
+# these out of ticker detection when WinRT flattens a Discord embed into lines.
 _TICKER_STOPWORDS = {
     "ALERT",
+    "BORROW",
+    "BREAKOUT",
     "CHECK",
     "FORM",
+    "HALTED",
+    "INITIAL",
     "MARKET",
+    "MOMENTUM",
     "NEWS",
+    "OFFERINGS",
+    "POTENTIAL",
     "PRICE",
+    "PUBLIC",
     "SEC",
     "SMALL",
+    "SQUEEZE",
     "STOCK",
     "TRENDVISION",
+    "WHALE",
 }
 
 
@@ -71,7 +83,10 @@ def _clean_lines(lines: list[str]) -> list[str]:
 
 
 def _find_ticker(body_lines: list[str]) -> str | None:
-    for line in body_lines[:4]:
+    # Rich Discord embeds can put a heading before the symbol (for example
+    # "Small Whale Alert" or "Initial Public Offerings Scanner"), so inspect a
+    # few more lines than the original prototype did.
+    for line in body_lines[:8]:
         match = _TICKER_RE.match(line)
         if not match:
             continue
