@@ -2,17 +2,16 @@ from __future__ import annotations
 
 import hashlib
 import re
+import unicodedata
 from dataclasses import dataclass
 
 from .models import CapturedNotification
 
-# WinRT and UI Automation can expose slightly different whitespace/prefixes.
-# Keep this deliberately tolerant while still requiring the TrendVision scanner
-# header shape with a #channel inside parentheses.
-_CHANNEL_RE = re.compile(
-    r"TrendVision\s*\(\s*#(?P<channel>[^,\)]+)",
-    re.IGNORECASE,
-)
+# WinRT can inject invisible bidi/format characters into toast text. Rather
+# than depending on exact punctuation around the channel, normalize those
+# characters away and extract the first Discord-style #channel token from a
+# line that contains TrendVision.
+_CHANNEL_TOKEN_RE = re.compile(r"#(?P<channel>[A-Za-z0-9_-]+)", re.IGNORECASE)
 _TICKER_RE = re.compile(r"^\s*(?P<ticker>[A-Z][A-Z0-9.\-]{0,7})\b")
 
 # Common scanner headings/labels that can appear before the real symbol. Keep
@@ -65,18 +64,38 @@ class ParsedToast:
         )
 
 
+def _strip_format_chars(value: str) -> str:
+    """Remove invisible Unicode format controls (bidi marks, BOM, etc.)."""
+    return "".join(ch for ch in value if unicodedata.category(ch) != "Cf")
+
+
+def _normalize_line(value: str) -> str:
+    value = _strip_format_chars(str(value))
+    return " ".join(value.split()).strip()
+
+
+def extract_channel_from_header(line: str) -> str | None:
+    """Extract a TrendVision Discord #channel from one WinRT/UIA text line.
+
+    We deliberately do not require exact parentheses/comma formatting because
+    the Windows notification projection can insert invisible directionality
+    characters. The line must still contain the TrendVision name, which keeps
+    this specific to scanner notification headers.
+    """
+    normalized = _normalize_line(line)
+    if "trendvision" not in normalized.casefold():
+        return None
+
+    match = _CHANNEL_TOKEN_RE.search(normalized)
+    if match is None:
+        return None
+    return match.group("channel").strip()
+
+
 def _clean_lines(lines: list[str]) -> list[str]:
     cleaned: list[str] = []
     for value in lines:
-        # Strip common invisible Unicode characters seen in notification payloads
-        # before normal whitespace cleanup.
-        value = (
-            value.replace("\u200b", "")
-            .replace("\u200e", "")
-            .replace("\u200f", "")
-            .replace("\ufeff", "")
-        )
-        value = " ".join(value.split()).strip()
+        value = _normalize_line(value)
         if value and value not in cleaned:
             cleaned.append(value)
     return cleaned
@@ -113,18 +132,17 @@ def parse_uia_texts(texts: list[str]) -> ParsedToast | None:
         return None
 
     header_index: int | None = None
-    channel_match = None
+    channel: str | None = None
     for i, line in enumerate(lines):
-        match = _CHANNEL_RE.search(line)
-        if match:
+        candidate = extract_channel_from_header(line)
+        if candidate:
             header_index = i
-            channel_match = match
+            channel = candidate
             break
 
-    if header_index is None or channel_match is None:
+    if header_index is None or channel is None:
         return None
 
-    channel = channel_match.group("channel").strip()
     app_name = next(
         (line for line in lines[:3] if "discord" in line.casefold()),
         "Discord",
