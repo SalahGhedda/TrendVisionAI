@@ -43,7 +43,7 @@ def main() -> int:
     config = load_config(config_path if config_path.exists() else None)
 
     logging.basicConfig(
-        level=logging.INFO if args.debug else logging.WARNING,
+        level=logging.DEBUG if args.debug else logging.WARNING,
         format="%(asctime)s %(levelname)s %(name)s - %(message)s",
     )
 
@@ -55,6 +55,8 @@ def main() -> int:
 
     print("TrendVisionAI Listener v0.1")
     print("Listening for visible Windows notifications containing 'TrendVision'...")
+    if args.debug:
+        print("DEBUG MODE: UI Automation discovery diagnostics are enabled.")
     print("Leave this window open. Press Ctrl+C to stop.")
     print(f"Database: {config.database_path}")
 
