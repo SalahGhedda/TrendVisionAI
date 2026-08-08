@@ -1,4 +1,4 @@
-from trendvision_ai.parser import parse_uia_texts
+from trendvision_ai.parser import extract_channel_from_header, parse_uia_texts
 
 
 def test_parse_social_news_notification_from_screenshot_shape():
@@ -31,6 +31,21 @@ def test_parse_winrt_social_news_payload():
     assert parsed.channel == "social-news"
     assert parsed.title == "Prices of all food categories are up 29%, per CNBC"
     assert parsed.ticker is None
+
+
+def test_parse_channel_with_invisible_bidi_controls():
+    header = "\u2066TrendVision\u2069 (\u200e#social-news\u200f, Trend Vision Scanner)"
+    assert extract_channel_from_header(header) == "social-news"
+
+    parsed = parse_uia_texts(
+        [
+            "Discord",
+            header,
+            "29% of buy now, pay later users said they've used these short-term loans to buy groceries.",
+        ]
+    )
+    assert parsed is not None
+    assert parsed.channel == "social-news"
 
 
 def test_parse_scanner_ticker():
