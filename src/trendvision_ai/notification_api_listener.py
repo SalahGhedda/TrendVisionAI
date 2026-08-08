@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import json
+from datetime import datetime, timezone
 from pathlib import Path
 
 from .config import load_config
@@ -55,6 +57,31 @@ def _print_raw_candidate(app_name: str, notification_id: int | str, lines: list[
     print("-" * 72, flush=True)
 
 
+def _save_raw_candidate(
+    path: Path,
+    *,
+    app_name: str,
+    notification_id: int | str,
+    lines: list[str],
+) -> None:
+    """Persist the WinRT payload even if our TrendVision parser does not match.
+
+    During scanner-format discovery the raw Windows payload is more valuable
+    than a successful parse. Keeping every relevant Discord candidate means we
+    can improve parsers later without asking the user to reproduce an alert or
+    screenshot the terminal at exactly the right moment.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "captured_at": datetime.now(timezone.utc).astimezone().isoformat(timespec="seconds"),
+        "app_name": app_name,
+        "notification_id": notification_id,
+        "lines": lines,
+    }
+    with path.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(payload, ensure_ascii=False) + "\n")
+
+
 def _print_saved(notification, saved: bool) -> None:
     status = "SAVED" if saved else "DUPLICATE"
     print("\n" + "=" * 72)
@@ -95,6 +122,7 @@ async def main() -> int:
     config_path = Path(args.config)
     config = load_config(config_path if config_path.exists() else None)
     store = AlertStore(config.database_path, config.jsonl_path)
+    raw_candidate_path = Path("data/winrt_candidates.jsonl")
 
     poll_seconds = max(args.poll_ms, 100) / 1000.0
     seen_ids: set[tuple[str, int | str]] = set()
@@ -106,6 +134,7 @@ async def main() -> int:
     print("Keep this window open BEFORE the next Discord popup appears.")
     print("Press Ctrl+C to stop.")
     print(f"Database: {config.database_path}")
+    print(f"Raw WinRT log: {raw_candidate_path}")
 
     try:
         while True:
@@ -131,6 +160,12 @@ async def main() -> int:
                 if not _looks_relevant(app_name, lines):
                     continue
 
+                _save_raw_candidate(
+                    raw_candidate_path,
+                    app_name=app_name,
+                    notification_id=notification_id,
+                    lines=lines,
+                )
                 _print_raw_candidate(app_name, notification_id, lines)
 
                 # Reuse the parser by giving it the application label followed
@@ -138,7 +173,8 @@ async def main() -> int:
                 parsed = parse_uia_texts([app_name, *lines])
                 if parsed is None:
                     print(
-                        "Relevant notification detected, but TrendVision parser did not match it yet.",
+                        "Relevant notification detected, but TrendVision parser did not match it yet. "
+                        "Raw payload was saved to data\\winrt_candidates.jsonl.",
                         flush=True,
                     )
                     continue
