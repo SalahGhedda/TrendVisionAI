@@ -6,11 +6,20 @@ from dataclasses import dataclass
 
 from .models import CapturedNotification
 
-_CHANNEL_RE = re.compile(r"TrendVision\s*\(#(?P<channel>[^,\)]+)", re.IGNORECASE)
+_CHANNEL_RE = re.compile(r"^TrendVision\s*\(#(?P<channel>[^,\)]+)", re.IGNORECASE)
 _TICKER_RE = re.compile(r"^\s*(?P<ticker>[A-Z][A-Z0-9.\-]{0,7})\b")
 
 _TICKER_STOPWORDS = {
-    "ALERT", "CHECK", "FORM", "MARKET", "NEWS", "PRICE", "SEC", "SMALL", "STOCK", "TRENDVISION",
+    "ALERT",
+    "CHECK",
+    "FORM",
+    "MARKET",
+    "NEWS",
+    "PRICE",
+    "SEC",
+    "SMALL",
+    "STOCK",
+    "TRENDVISION",
 }
 
 
@@ -63,13 +72,29 @@ def parse_uia_texts(texts: list[str]) -> ParsedToast | None:
     if not lines:
         return None
 
-    header_index = next((i for i, line in enumerate(lines) if "TrendVision" in line), None)
-    if header_index is None:
+    # A real Discord Windows toast exposes the application name as its own UIA
+    # text element. Requiring it prevents ordinary windows (VS Code, browser,
+    # terminals, etc.) that merely contain the word "TrendVision" from being
+    # mistaken for notifications.
+    if not any(line.casefold() == "discord" for line in lines):
         return None
 
-    header = lines[header_index]
-    channel_match = _CHANNEL_RE.search(header)
-    channel = channel_match.group("channel").strip() if channel_match else None
+    # Do not match arbitrary text containing TrendVision/TrendVisionAI. The
+    # notification header observed on Windows is shaped like:
+    #   TrendVision (#volume-scanner, Trend Vision Scanner)
+    header_index: int | None = None
+    channel_match = None
+    for i, line in enumerate(lines):
+        match = _CHANNEL_RE.search(line)
+        if match:
+            header_index = i
+            channel_match = match
+            break
+
+    if header_index is None or channel_match is None:
+        return None
+
+    channel = channel_match.group("channel").strip()
     app_name = "Discord"
 
     body_lines = lines[header_index + 1 :]
