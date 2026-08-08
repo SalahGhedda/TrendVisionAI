@@ -6,7 +6,13 @@ from dataclasses import dataclass
 
 from .models import CapturedNotification
 
-_CHANNEL_RE = re.compile(r"^TrendVision\s*\(#(?P<channel>[^,\)]+)", re.IGNORECASE)
+# WinRT and UI Automation can expose slightly different whitespace/prefixes.
+# Keep this deliberately tolerant while still requiring the TrendVision scanner
+# header shape with a #channel inside parentheses.
+_CHANNEL_RE = re.compile(
+    r"TrendVision\s*\(\s*#(?P<channel>[^,\)]+)",
+    re.IGNORECASE,
+)
 _TICKER_RE = re.compile(r"^\s*(?P<ticker>[A-Z][A-Z0-9.\-]{0,7})\b")
 
 _TICKER_STOPWORDS = {
@@ -50,7 +56,15 @@ class ParsedToast:
 def _clean_lines(lines: list[str]) -> list[str]:
     cleaned: list[str] = []
     for value in lines:
-        value = " ".join(value.replace("\u200b", "").split()).strip()
+        # Strip common invisible Unicode characters seen in notification payloads
+        # before normal whitespace cleanup.
+        value = (
+            value.replace("\u200b", "")
+            .replace("\u200e", "")
+            .replace("\u200f", "")
+            .replace("\ufeff", "")
+        )
+        value = " ".join(value.split()).strip()
         if value and value not in cleaned:
             cleaned.append(value)
     return cleaned
@@ -68,20 +82,21 @@ def _find_ticker(body_lines: list[str]) -> str | None:
 
 
 def parse_uia_texts(texts: list[str]) -> ParsedToast | None:
+    """Parse a TrendVision Discord notification from normalized text lines.
+
+    The function name is retained for compatibility with the original UIA
+    prototype, but it now also accepts text extracted through WinRT's
+    UserNotificationListener.
+    """
     lines = _clean_lines(texts)
     if not lines:
         return None
 
-    # A real Discord Windows toast exposes the application name as its own UIA
-    # text element. Requiring it prevents ordinary windows (VS Code, browser,
-    # terminals, etc.) that merely contain the word "TrendVision" from being
-    # mistaken for notifications.
-    if not any(line.casefold() == "discord" for line in lines):
+    # The caller prepends the originating app name. Accept exact Discord or a
+    # longer app label containing Discord, but still reject arbitrary windows.
+    if not any("discord" in line.casefold() for line in lines[:3]):
         return None
 
-    # Do not match arbitrary text containing TrendVision/TrendVisionAI. The
-    # notification header observed on Windows is shaped like:
-    #   TrendVision (#volume-scanner, Trend Vision Scanner)
     header_index: int | None = None
     channel_match = None
     for i, line in enumerate(lines):
@@ -95,10 +110,17 @@ def parse_uia_texts(texts: list[str]) -> ParsedToast | None:
         return None
 
     channel = channel_match.group("channel").strip()
-    app_name = "Discord"
+    app_name = next(
+        (line for line in lines[:3] if "discord" in line.casefold()),
+        "Discord",
+    )
 
     body_lines = lines[header_index + 1 :]
-    body_lines = [line for line in body_lines if line.lower() not in {"close", "dismiss", "x"}]
+    body_lines = [
+        line
+        for line in body_lines
+        if line.casefold() not in {"close", "dismiss", "x"}
+    ]
 
     title: str | None = None
     body = ""
@@ -108,7 +130,7 @@ def parse_uia_texts(texts: list[str]) -> ParsedToast | None:
 
     ticker = _find_ticker(body_lines)
     raw_text = "\n".join(lines)
-    normalized = "\n".join(line.lower() for line in lines)
+    normalized = "\n".join(line.casefold() for line in lines)
     fingerprint = hashlib.sha256(normalized.encode("utf-8")).hexdigest()
 
     return ParsedToast(
