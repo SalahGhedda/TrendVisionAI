@@ -46,19 +46,76 @@ def _extract_window_texts(window) -> list[str]:
     return texts
 
 
-def _looks_like_discord_toast(texts: list[str]) -> bool:
-    """Cheap guard before parsing the whole candidate.
+def _window_geometry(window) -> tuple[int, int] | None:
+    try:
+        rect = window.rectangle()
+        return int(rect.width()), int(rect.height())
+    except Exception:
+        return None
 
-    The first prototype scanned every desktop window containing the word
-    TrendVision. That caused VS Code/browser windows containing our own project
-    name or chat text to be captured as fake alerts. Real Discord toasts expose
-    both an exact `Discord` app label and the TrendVision scanner header.
+
+def _window_debug_description(window) -> str:
+    parts: list[str] = []
+    try:
+        parts.append(f"title={window.window_text()!r}")
+    except Exception:
+        pass
+    try:
+        parts.append(f"class={window.class_name()!r}")
+    except Exception:
+        pass
+    try:
+        parts.append(f"pid={window.process_id()}")
+    except Exception:
+        pass
+    geometry = _window_geometry(window)
+    if geometry is not None:
+        parts.append(f"size={geometry[0]}x{geometry[1]}")
+    return ", ".join(parts) or "<metadata unavailable>"
+
+
+def _looks_like_discord_toast(window, texts: list[str]) -> bool:
+    """Reject ordinary app/browser windows before parsing a notification.
+
+    Our first guard only required an exact `Discord` label plus a
+    `TrendVision (#...)` line. A browser showing this ChatGPT conversation can
+    contain both strings, so it still looked like a notification.
+
+    A live Windows toast is a small top-level surface with relatively little
+    accessibility text. Full browser/VS Code windows are much larger and expose
+    hundreds of controls. We therefore require both the Discord/TrendVision
+    signature *and* toast-like geometry/text volume.
     """
     has_discord_app_label = any(text.strip().casefold() == "discord" for text in texts)
     has_trendvision_header = any(
         text.strip().casefold().startswith("trendvision (#") for text in texts
     )
-    return has_discord_app_label and has_trendvision_header
+    if not (has_discord_app_label and has_trendvision_header):
+        return False
+
+    # Safety valve: a notification should never expose an entire application's
+    # accessibility tree. This also protects us if window geometry is unusual.
+    if len(texts) > 45:
+        return False
+    if sum(len(text) for text in texts) > 5000:
+        return False
+
+    geometry = _window_geometry(window)
+    if geometry is None:
+        # Unknown geometry is allowed for now because Windows builds differ.
+        # The text-volume checks above still reject the false positives we saw.
+        return True
+
+    width, height = geometry
+    if width <= 0 or height <= 0:
+        return False
+
+    # Windows 10/11 toast surfaces are compact. Keep generous limits so DPI
+    # scaling and accessibility settings do not accidentally reject a real one.
+    if width > 1000 or height > 900:
+        return False
+
+    return True
 
 
 def listen_for_trendvision_toasts(
@@ -87,11 +144,29 @@ def listen_for_trendvision_toasts(
                 LOGGER.debug("Failed reading a UIA window: %s", exc)
                 continue
 
-            if not texts or not _looks_like_discord_toast(texts):
+            if not texts:
+                continue
+
+            has_signature = (
+                any(text.strip().casefold() == "discord" for text in texts)
+                and any(text.strip().casefold().startswith("trendvision (#") for text in texts)
+            )
+
+            if not _looks_like_discord_toast(window, texts):
+                if debug and has_signature:
+                    LOGGER.info(
+                        "Rejected Discord/TrendVision window (%s):\n%s",
+                        _window_debug_description(window),
+                        "\n".join(texts[:60]),
+                    )
                 continue
 
             if debug:
-                LOGGER.info("Discord TrendVision UIA candidate:\n%s", "\n".join(texts))
+                LOGGER.info(
+                    "Discord TrendVision toast candidate (%s):\n%s",
+                    _window_debug_description(window),
+                    "\n".join(texts),
+                )
 
             parsed = parse_uia_texts(texts)
             if parsed is None:
