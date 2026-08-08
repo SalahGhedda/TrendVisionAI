@@ -80,6 +80,18 @@ def _window_debug_description(window) -> str:
     return ", ".join(parts) or "<metadata unavailable>"
 
 
+def _relevant_debug_lines(texts: list[str], limit: int = 8) -> str:
+    """Return a tiny useful sample instead of dumping an entire browser UI tree."""
+    relevant = [
+        " ".join(text.split())
+        for text in texts
+        if "discord" in text.casefold() or "trendvision" in text.casefold()
+    ]
+    if not relevant:
+        relevant = [" ".join(text.split()) for text in texts[:3]]
+    return " | ".join(relevant[:limit])
+
+
 def _has_notification_signature(texts: list[str]) -> bool:
     lowered = [text.strip().casefold() for text in texts]
     has_discord = any("discord" in text for text in lowered)
@@ -145,13 +157,7 @@ def _walk_ancestors(element_info, max_levels: int = 12) -> Iterable[object]:
 
 
 def _search_named_elements(find_elements, *, debug: bool):
-    """Find UIA elements that may belong to a Discord/TrendVision toast.
-
-    Different Windows/Discord builds expose different accessible names. Some
-    report an exact `Discord` label, while others expose phrases such as
-    `Discord notification` or put TrendVision in a separate child. In debug
-    mode we therefore perform a few broader searches too.
-    """
+    """Find UIA elements that may belong to a Discord/TrendVision toast."""
     searches = [
         ("Discord exact", {"title": "Discord"}),
         ("Discord fuzzy", {"title_re": r"(?i).*discord.*"}),
@@ -192,13 +198,7 @@ def _search_named_elements(find_elements, *, debug: bool):
 
 
 def _discover_candidate_surfaces(desktop, UIAWrapper, find_elements, *, debug: bool):
-    """Yield possible toast surfaces.
-
-    A Windows toast is not guaranteed to be a top-level window. It may be a
-    nested subtree owned by the Windows shell. We therefore inspect both normal
-    top-level windows and ancestors of UIA elements whose accessible names look
-    related to Discord or TrendVision.
-    """
+    """Yield possible toast surfaces from top-level and nested Windows UIA trees."""
     yielded: set[str] = set()
 
     try:
@@ -247,9 +247,9 @@ def _discover_candidate_surfaces(desktop, UIAWrapper, find_elements, *, debug: b
                 for text in texts
             ):
                 LOGGER.debug(
-                    "Ancestor probe (%s):\n%s",
+                    "Ancestor probe (%s) sample=%s",
                     _window_debug_description(surface),
-                    "\n".join(texts[:80]),
+                    _relevant_debug_lines(texts),
                 )
 
             if not _has_notification_signature(texts):
@@ -292,9 +292,9 @@ def listen_for_trendvision_toasts(
             if not _looks_like_discord_toast(window, texts):
                 if debug and has_signature:
                     LOGGER.info(
-                        "Rejected Discord/TrendVision surface (%s):\n%s",
+                        "Rejected non-toast surface (%s) sample=%s",
                         _window_debug_description(window),
-                        "\n".join(texts[:80]),
+                        _relevant_debug_lines(texts),
                     )
                 continue
 
