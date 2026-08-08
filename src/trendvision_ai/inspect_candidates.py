@@ -1,18 +1,17 @@
 from __future__ import annotations
 
 import json
-import re
 from collections import Counter, defaultdict
 from pathlib import Path
 
-CHANNEL_RE = re.compile(r"TrendVision\s*\(\s*#(?P<channel>[^,\)]+)", re.IGNORECASE)
+from .parser import extract_channel_from_header
 
 
 def _channel_from_lines(lines: list[str]) -> str:
     for line in lines:
-        match = CHANNEL_RE.search(str(line))
-        if match:
-            return match.group("channel").strip()
+        channel = extract_channel_from_header(str(line))
+        if channel:
+            return channel
     return "unknown"
 
 
