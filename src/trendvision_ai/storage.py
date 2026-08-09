@@ -33,7 +33,9 @@ CREATE TABLE IF NOT EXISTS scanner_events (
     event_type TEXT NOT NULL,
     headline TEXT NOT NULL,
     raw_text TEXT NOT NULL,
-    fingerprint TEXT NOT NULL UNIQUE
+    fingerprint TEXT NOT NULL UNIQUE,
+    data_json TEXT NOT NULL DEFAULT '{}',
+    item_index INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS idx_scanner_events_ticker ON scanner_events(ticker);
 CREATE INDEX IF NOT EXISTS idx_scanner_events_channel ON scanner_events(channel);
@@ -55,6 +57,21 @@ class AlertStore:
     def _initialize(self) -> None:
         with self._connect() as connection:
             connection.executescript(SCHEMA)
+
+            # Existing prototype databases predate channel-specific JSON and
+            # multi-item all-in-one notifications. Migrate them in place so the
+            # user does not have to delete collected alert history.
+            columns = {
+                row[1] for row in connection.execute("PRAGMA table_info(scanner_events)")
+            }
+            if "data_json" not in columns:
+                connection.execute(
+                    "ALTER TABLE scanner_events ADD COLUMN data_json TEXT NOT NULL DEFAULT '{}'"
+                )
+            if "item_index" not in columns:
+                connection.execute(
+                    "ALTER TABLE scanner_events ADD COLUMN item_index INTEGER NOT NULL DEFAULT 0"
+                )
 
     def save(self, notification: CapturedNotification) -> bool:
         try:
@@ -92,8 +109,8 @@ class AlertStore:
                     """
                     INSERT INTO scanner_events (
                         received_at, channel, ticker, event_type, headline,
-                        raw_text, fingerprint
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                        raw_text, fingerprint, data_json, item_index
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         event.received_at,
@@ -103,6 +120,8 @@ class AlertStore:
                         event.headline,
                         event.raw_text,
                         event.fingerprint,
+                        json.dumps(event.data, ensure_ascii=False, sort_keys=True),
+                        event.item_index,
                     ),
                 )
         except sqlite3.IntegrityError:
