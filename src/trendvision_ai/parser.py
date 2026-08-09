@@ -26,6 +26,7 @@ _TICKER_STOPWORDS = {
     "INITIAL",
     "MARKET",
     "MOMENTUM",
+    "NEW",
     "NEWS",
     "OFFERINGS",
     "POTENTIAL",
@@ -96,7 +97,7 @@ def _clean_lines(lines: list[str]) -> list[str]:
 
 
 def _find_ticker(body_lines: list[str]) -> str | None:
-    for line in body_lines[:8]:
+    for line in body_lines[:10]:
         match = _TICKER_RE.match(line)
         if not match:
             continue
@@ -107,7 +108,18 @@ def _find_ticker(body_lines: list[str]) -> str | None:
 
 
 def parse_uia_texts(texts: list[str]) -> ParsedToast | None:
-    """Parse a TrendVision Discord notification from WinRT/UIA text lines."""
+    """Normalize a TrendVision Discord notification from WinRT/UIA text lines.
+
+    This layer intentionally stays lossless and simple. It identifies the
+    channel, preserves the payload as ``body``, and extracts a best-effort
+    ticker when the channel is ticker-oriented. Channel-specific meaning is
+    handled later by ``scanner_events.py``.
+
+    We deliberately do *not* manufacture a generic ``title`` from the first
+    payload line. TrendVision channels have different schemas (and social-news
+    has only a body), so treating the first line as a title caused misleading
+    duplicated data.
+    """
     lines = _clean_lines(texts)
     if not lines:
         return None
@@ -132,24 +144,15 @@ def parse_uia_texts(texts: list[str]) -> ParsedToast | None:
         "Discord",
     )
 
-    body_lines = lines[header_index + 1 :]
     body_lines = [
         line
-        for line in body_lines
+        for line in lines[header_index + 1 :]
         if line.casefold() not in {"close", "dismiss", "x"}
     ]
 
-    # Channel semantics matter. social-news is just a general news body; it has
-    # no ticker/title fields in TrendVision, so don't manufacture them merely
-    # to fit the generic notification model.
-    if channel.casefold() == "social-news":
-        title: str | None = None
-        body = "\n".join(body_lines)
-        ticker: str | None = None
-    else:
-        title = body_lines[0] if body_lines else None
-        body = "\n".join(body_lines[1:]) if len(body_lines) > 1 else (body_lines[0] if body_lines else "")
-        ticker = _find_ticker(body_lines)
+    body = "\n".join(body_lines)
+    channel_key = channel.casefold()
+    ticker = None if channel_key == "social-news" else _find_ticker(body_lines)
 
     raw_text = "\n".join(lines)
     normalized = "\n".join(line.casefold() for line in lines)
@@ -159,7 +162,7 @@ def parse_uia_texts(texts: list[str]) -> ParsedToast | None:
         app_name=app_name,
         source="TrendVision",
         channel=channel,
-        title=title,
+        title=None,
         body=body,
         raw_text=raw_text,
         ticker=ticker,
