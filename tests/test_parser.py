@@ -13,9 +13,12 @@ def test_parse_social_news_notification_from_screenshot_shape():
 
     assert parsed is not None
     assert parsed.channel == "social-news"
-    assert parsed.title == "Check this out."
+    assert parsed.title is None
     assert parsed.ticker is None
-    assert "Market Maps" in parsed.body
+    assert parsed.body == (
+        "Check this out.\n"
+        "Market Maps lets you see where the market is moving at a glance, making it easier to spot trends."
+    )
 
 
 def test_parse_winrt_social_news_payload():
@@ -29,8 +32,9 @@ def test_parse_winrt_social_news_payload():
 
     assert parsed is not None
     assert parsed.channel == "social-news"
-    assert parsed.title == "Prices of all food categories are up 29%, per CNBC"
+    assert parsed.title is None
     assert parsed.ticker is None
+    assert parsed.body == "Prices of all food categories are up 29%, per CNBC"
 
 
 def test_parse_channel_with_invisible_bidi_controls():
@@ -46,6 +50,8 @@ def test_parse_channel_with_invisible_bidi_controls():
     )
     assert parsed is not None
     assert parsed.channel == "social-news"
+    assert parsed.title is None
+    assert parsed.ticker is None
 
 
 def test_parse_scanner_ticker():
