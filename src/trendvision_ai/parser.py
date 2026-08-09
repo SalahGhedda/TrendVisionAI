@@ -75,13 +75,7 @@ def _normalize_line(value: str) -> str:
 
 
 def extract_channel_from_header(line: str) -> str | None:
-    """Extract a TrendVision Discord #channel from one WinRT/UIA text line.
-
-    We deliberately do not require exact parentheses/comma formatting because
-    the Windows notification projection can insert invisible directionality
-    characters. The line must still contain the TrendVision name, which keeps
-    this specific to scanner notification headers.
-    """
+    """Extract a TrendVision Discord #channel from one WinRT/UIA text line."""
     normalized = _normalize_line(line)
     if "trendvision" not in normalized.casefold():
         return None
@@ -102,9 +96,6 @@ def _clean_lines(lines: list[str]) -> list[str]:
 
 
 def _find_ticker(body_lines: list[str]) -> str | None:
-    # Rich Discord embeds can put a heading before the symbol (for example
-    # "Small Whale Alert" or "Initial Public Offerings Scanner"), so inspect a
-    # few more lines than the original prototype did.
     for line in body_lines[:8]:
         match = _TICKER_RE.match(line)
         if not match:
@@ -116,18 +107,11 @@ def _find_ticker(body_lines: list[str]) -> str | None:
 
 
 def parse_uia_texts(texts: list[str]) -> ParsedToast | None:
-    """Parse a TrendVision Discord notification from normalized text lines.
-
-    The function name is retained for compatibility with the original UIA
-    prototype, but it now also accepts text extracted through WinRT's
-    UserNotificationListener.
-    """
+    """Parse a TrendVision Discord notification from WinRT/UIA text lines."""
     lines = _clean_lines(texts)
     if not lines:
         return None
 
-    # The caller prepends the originating app name. Accept exact Discord or a
-    # longer app label containing Discord, but still reject arbitrary windows.
     if not any("discord" in line.casefold() for line in lines[:3]):
         return None
 
@@ -155,13 +139,18 @@ def parse_uia_texts(texts: list[str]) -> ParsedToast | None:
         if line.casefold() not in {"close", "dismiss", "x"}
     ]
 
-    title: str | None = None
-    body = ""
-    if body_lines:
-        title = body_lines[0]
-        body = "\n".join(body_lines[1:]) if len(body_lines) > 1 else body_lines[0]
+    # Channel semantics matter. social-news is just a general news body; it has
+    # no ticker/title fields in TrendVision, so don't manufacture them merely
+    # to fit the generic notification model.
+    if channel.casefold() == "social-news":
+        title: str | None = None
+        body = "\n".join(body_lines)
+        ticker: str | None = None
+    else:
+        title = body_lines[0] if body_lines else None
+        body = "\n".join(body_lines[1:]) if len(body_lines) > 1 else (body_lines[0] if body_lines else "")
+        ticker = _find_ticker(body_lines)
 
-    ticker = _find_ticker(body_lines)
     raw_text = "\n".join(lines)
     normalized = "\n".join(line.casefold() for line in lines)
     fingerprint = hashlib.sha256(normalized.encode("utf-8")).hexdigest()
