@@ -7,37 +7,13 @@ from dataclasses import dataclass
 
 from .models import CapturedNotification
 
-# WinRT can inject invisible bidi/format characters into toast text. Rather
-# than depending on exact punctuation around the channel, normalize those
-# characters away and extract the first Discord-style #channel token from a
-# line that contains TrendVision.
 _CHANNEL_TOKEN_RE = re.compile(r"#(?P<channel>[A-Za-z0-9_-]+)", re.IGNORECASE)
 _TICKER_RE = re.compile(r"^\s*(?P<ticker>[A-Z][A-Z0-9.\-]{0,7})\b")
 
-# Common scanner headings/labels that can appear before the real symbol. Keep
-# these out of ticker detection when WinRT flattens a Discord embed into lines.
 _TICKER_STOPWORDS = {
-    "ALERT",
-    "BORROW",
-    "BREAKOUT",
-    "CHECK",
-    "FORM",
-    "HALTED",
-    "INITIAL",
-    "MARKET",
-    "MOMENTUM",
-    "NEW",
-    "NEWS",
-    "OFFERINGS",
-    "POTENTIAL",
-    "PRICE",
-    "PUBLIC",
-    "SEC",
-    "SMALL",
-    "SQUEEZE",
-    "STOCK",
-    "TRENDVISION",
-    "WHALE",
+    "ALERT", "BORROW", "BREAKOUT", "CHECK", "FORM", "HALTED", "INITIAL",
+    "MARKET", "MOMENTUM", "NEW", "NEWS", "OFFERINGS", "POTENTIAL", "PRICE",
+    "PUBLIC", "SEC", "SMALL", "SQUEEZE", "STOCK", "TRENDVISION", "WHALE",
 }
 
 
@@ -66,7 +42,6 @@ class ParsedToast:
 
 
 def _strip_format_chars(value: str) -> str:
-    """Remove invisible Unicode format controls (bidi marks, BOM, etc.)."""
     return "".join(ch for ch in value if unicodedata.category(ch) != "Cf")
 
 
@@ -76,11 +51,9 @@ def _normalize_line(value: str) -> str:
 
 
 def extract_channel_from_header(line: str) -> str | None:
-    """Extract a TrendVision Discord #channel from one WinRT/UIA text line."""
     normalized = _normalize_line(line)
     if "trendvision" not in normalized.casefold():
         return None
-
     match = _CHANNEL_TOKEN_RE.search(normalized)
     if match is None:
         return None
@@ -110,15 +83,9 @@ def _find_ticker(body_lines: list[str]) -> str | None:
 def parse_uia_texts(texts: list[str]) -> ParsedToast | None:
     """Normalize a TrendVision Discord notification from WinRT/UIA text lines.
 
-    This layer intentionally stays lossless and simple. It identifies the
-    channel, preserves the payload as ``body``, and extracts a best-effort
-    ticker when the channel is ticker-oriented. Channel-specific meaning is
-    handled later by ``scanner_events.py``.
-
-    We deliberately do *not* manufacture a generic ``title`` from the first
-    payload line. TrendVision channels have different schemas (and social-news
-    has only a body), so treating the first line as a title caused misleading
-    duplicated data.
+    This transport layer preserves the payload and channel without pretending
+    all channels share one title/ticker/body schema. Channel-specific meaning
+    is handled by ``scanner_events.py``.
     """
     lines = _clean_lines(texts)
     if not lines:
@@ -152,7 +119,12 @@ def parse_uia_texts(texts: list[str]) -> ParsedToast | None:
 
     body = "\n".join(body_lines)
     channel_key = channel.casefold()
-    ticker = None if channel_key == "social-news" else _find_ticker(body_lines)
+
+    # These notifications do not have one meaningful ticker at the transport
+    # level: social-news has none, all-in-one can contain several, and the IPO
+    # card must use the explicit Symbol field rather than guessing from text.
+    no_single_ticker_channels = {"social-news", "all-in-one-scanner", "ipo-scanner"}
+    ticker = None if channel_key in no_single_ticker_channels else _find_ticker(body_lines)
 
     raw_text = "\n".join(lines)
     normalized = "\n".join(line.casefold() for line in lines)
