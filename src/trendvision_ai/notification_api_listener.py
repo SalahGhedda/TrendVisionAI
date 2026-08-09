@@ -9,7 +9,7 @@ from pathlib import Path
 from .config import load_config
 from .notification_api_probe import _extract_text, _get_listener
 from .parser import parse_uia_texts
-from .scanner_events import build_scanner_event
+from .scanner_events import build_scanner_events
 from .storage import AlertStore
 
 
@@ -84,20 +84,17 @@ def _print_saved(notification, saved: bool, event_saved: bool | None = None) -> 
     print(f"[{notification.received_at}] TRENDVISION ALERT [{status}]")
     print(f"Channel : #{notification.channel or 'unknown'}")
 
-    # social-news is body-only in TrendVision. Keep the terminal output faithful
-    # to the channel rather than displaying fake/empty ticker and title fields.
     if channel == "social-news":
         print("Body:")
         print(notification.body or "(no body text exposed by Windows)")
     else:
-        print(f"Ticker  : {notification.ticker or '-'}")
-        if notification.title:
-            print(f"Title   : {notification.title}")
-        print("Body:")
+        if notification.ticker:
+            print(f"Ticker  : {notification.ticker}")
+        print("Payload:")
         print(notification.body or "(no body text exposed by Windows)")
 
     if event_saved is not None:
-        print(f"Scanner event: {'SAVED' if event_saved else 'DUPLICATE'}")
+        print(f"Scanner event(s): {'SAVED' if event_saved else 'PARTIAL/DUPLICATE'}")
     print("=" * 72, flush=True)
 
 
@@ -185,8 +182,9 @@ async def main() -> int:
 
                 captured = parsed.to_notification()
                 saved = store.save(captured)
-                event = build_scanner_event(captured)
-                event_saved = store.save_scanner_event(event) if event is not None else None
+                events = build_scanner_events(captured)
+                event_results = [store.save_scanner_event(event) for event in events]
+                event_saved = all(event_results) if event_results else None
                 _print_saved(captured, saved, event_saved)
 
             if scans % max(1, int(15 / poll_seconds)) == 0:
