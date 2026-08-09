@@ -9,6 +9,7 @@ from pathlib import Path
 from .config import load_config
 from .notification_api_probe import _extract_text, _get_listener
 from .parser import parse_uia_texts
+from .scanner_events import build_scanner_event
 from .storage import AlertStore
 
 
@@ -64,13 +65,6 @@ def _save_raw_candidate(
     notification_id: int | str,
     lines: list[str],
 ) -> None:
-    """Persist the WinRT payload even if our TrendVision parser does not match.
-
-    During scanner-format discovery the raw Windows payload is more valuable
-    than a successful parse. Keeping every relevant Discord candidate means we
-    can improve parsers later without asking the user to reproduce an alert or
-    screenshot the terminal at exactly the right moment.
-    """
     path.parent.mkdir(parents=True, exist_ok=True)
     payload = {
         "captured_at": datetime.now(timezone.utc).astimezone().isoformat(timespec="seconds"),
@@ -82,7 +76,7 @@ def _save_raw_candidate(
         handle.write(json.dumps(payload, ensure_ascii=False) + "\n")
 
 
-def _print_saved(notification, saved: bool) -> None:
+def _print_saved(notification, saved: bool, event_saved: bool | None = None) -> None:
     status = "SAVED" if saved else "DUPLICATE"
     print("\n" + "=" * 72)
     print(f"[{notification.received_at}] TRENDVISION ALERT [{status}]")
@@ -92,6 +86,8 @@ def _print_saved(notification, saved: bool) -> None:
         print(f"Title   : {notification.title}")
     print("Body:")
     print(notification.body or "(no body text exposed by Windows)")
+    if event_saved is not None:
+        print(f"Scanner event: {'SAVED' if event_saved else 'DUPLICATE'}")
     print("=" * 72, flush=True)
 
 
@@ -168,8 +164,6 @@ async def main() -> int:
                 )
                 _print_raw_candidate(app_name, notification_id, lines)
 
-                # Reuse the parser by giving it the application label followed
-                # by the text extracted from the Windows notification payload.
                 parsed = parse_uia_texts([app_name, *lines])
                 if parsed is None:
                     print(
@@ -181,10 +175,10 @@ async def main() -> int:
 
                 captured = parsed.to_notification()
                 saved = store.save(captured)
-                _print_saved(captured, saved)
+                event = build_scanner_event(captured)
+                event_saved = store.save_scanner_event(event) if event is not None else None
+                _print_saved(captured, saved, event_saved)
 
-            # A small heartbeat proves the long-running listener is still alive,
-            # without flooding the terminal.
             if scans % max(1, int(15 / poll_seconds)) == 0:
                 print(
                     f"Listener alive | current Windows toasts={len(notifications)} | "
