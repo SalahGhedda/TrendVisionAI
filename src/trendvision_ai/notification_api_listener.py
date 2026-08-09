@@ -78,14 +78,24 @@ def _save_raw_candidate(
 
 def _print_saved(notification, saved: bool, event_saved: bool | None = None) -> None:
     status = "SAVED" if saved else "DUPLICATE"
+    channel = (notification.channel or "unknown").casefold()
+
     print("\n" + "=" * 72)
     print(f"[{notification.received_at}] TRENDVISION ALERT [{status}]")
     print(f"Channel : #{notification.channel or 'unknown'}")
-    print(f"Ticker  : {notification.ticker or '-'}")
-    if notification.title:
-        print(f"Title   : {notification.title}")
-    print("Body:")
-    print(notification.body or "(no body text exposed by Windows)")
+
+    # social-news is body-only in TrendVision. Keep the terminal output faithful
+    # to the channel rather than displaying fake/empty ticker and title fields.
+    if channel == "social-news":
+        print("Body:")
+        print(notification.body or "(no body text exposed by Windows)")
+    else:
+        print(f"Ticker  : {notification.ticker or '-'}")
+        if notification.title:
+            print(f"Title   : {notification.title}")
+        print("Body:")
+        print(notification.body or "(no body text exposed by Windows)")
+
     if event_saved is not None:
         print(f"Scanner event: {'SAVED' if event_saved else 'DUPLICATE'}")
     print("=" * 72, flush=True)
