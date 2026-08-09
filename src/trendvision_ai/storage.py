@@ -5,6 +5,7 @@ import sqlite3
 from pathlib import Path
 
 from .models import CapturedNotification
+from .scanner_events import ScannerEvent
 
 
 SCHEMA = """
@@ -23,6 +24,20 @@ CREATE TABLE IF NOT EXISTS raw_notifications (
 CREATE INDEX IF NOT EXISTS idx_raw_notifications_ticker ON raw_notifications(ticker);
 CREATE INDEX IF NOT EXISTS idx_raw_notifications_channel ON raw_notifications(channel);
 CREATE INDEX IF NOT EXISTS idx_raw_notifications_received_at ON raw_notifications(received_at);
+
+CREATE TABLE IF NOT EXISTS scanner_events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    received_at TEXT NOT NULL,
+    channel TEXT NOT NULL,
+    ticker TEXT,
+    event_type TEXT NOT NULL,
+    headline TEXT NOT NULL,
+    raw_text TEXT NOT NULL,
+    fingerprint TEXT NOT NULL UNIQUE
+);
+CREATE INDEX IF NOT EXISTS idx_scanner_events_ticker ON scanner_events(ticker);
+CREATE INDEX IF NOT EXISTS idx_scanner_events_channel ON scanner_events(channel);
+CREATE INDEX IF NOT EXISTS idx_scanner_events_received_at ON scanner_events(received_at);
 """
 
 
@@ -68,4 +83,28 @@ class AlertStore:
 
         with self.jsonl_path.open("a", encoding="utf-8") as handle:
             handle.write(json.dumps(notification.to_dict(), ensure_ascii=False) + "\n")
+        return True
+
+    def save_scanner_event(self, event: ScannerEvent) -> bool:
+        try:
+            with self._connect() as connection:
+                connection.execute(
+                    """
+                    INSERT INTO scanner_events (
+                        received_at, channel, ticker, event_type, headline,
+                        raw_text, fingerprint
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        event.received_at,
+                        event.channel,
+                        event.ticker,
+                        event.event_type,
+                        event.headline,
+                        event.raw_text,
+                        event.fingerprint,
+                    ),
+                )
+        except sqlite3.IntegrityError:
+            return False
         return True
