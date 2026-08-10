@@ -2,7 +2,7 @@
 
 TrendVisionAI is a local Windows dashboard that captures TrendVision Discord scanner notifications, turns them into structured events, accumulates per-ticker memory, and can manually request an AI second-pass review of an interesting ticker.
 
-## Current milestone: Manual AI candidate review
+## Current milestone: Calibrated AI candidate review v2
 
 The app currently:
 
@@ -14,6 +14,7 @@ The app currently:
 6. Ranks recent scanner convergence into an **attention list** for review.
 7. Presents the workflow through a PySide6 desktop UI.
 8. Lets the user manually send one ticker's recent TrendVision case file to the OpenAI Responses API for a structured candidate review.
+9. Applies deterministic local guardrails after the model response so obvious halt/chase/data-conflict risk cannot be understated by the AI.
 
 There is **no brokerage integration, automatic order execution, automatic AI scanning, or external market-data enrichment** in this version.
 
@@ -66,9 +67,22 @@ Shows everything accumulated for one ticker:
 - full activity timeline
 - latest saved AI candidate review
 
-The **Analyze with AI** button is manual. It sends only the TrendVision information already stored for the ticker inside a 30-minute recent-convergence window. It does not add external price/chart/news/SEC data, and missing Discord-toast fields remain unknown rather than being invented.
+The **Analyze with AI** button is manual. It sends only the TrendVision information already stored for the ticker inside a 30-minute recent-convergence window. It does not add external price/chart/news/SEC/options data, and missing Discord-toast fields remain unknown rather than being invented.
 
-AI reviews are saved in the local SQLite `ai_reviews` table so reopening the ticker shows the latest review.
+AI Review v2 deliberately separates four different questions:
+
+- **Interest** — how unusual / worthy of attention the scanner convergence is (`LOW` to `VERY HIGH`)
+- **Risk** — how dangerous, extended, halted, volatile or chase-prone it is (`LOW` to `EXTREME`)
+- **Evidence quality** — how complete and internally consistent the captured evidence is (`LOW` to `HIGH`)
+- **Review status** — `IGNORE`, `WATCH`, `WAIT FOR CONFIRMATION`, `POTENTIAL SETUP`, or `AVOID`
+
+This avoids treating an extremely interesting runner as if it were automatically a clean setup.
+
+After the model responds, local deterministic guardrails currently enforce several obvious rules. For example, multiple halt events or a captured move of 100%+ force `EXTREME` risk, one halt or a 50%+ captured move forces at least `HIGH` risk, detected data conflicts cap evidence quality at `MEDIUM`, and an `EXTREME`-risk or conflicted case cannot remain `POTENTIAL SETUP` without further confirmation.
+
+The review prompt also explicitly prevents several unsupported shortcuts discovered during real testing: country flags/origin are neutral by themselves, market cap is not treated as proof of liquidity, labels such as `Known Runner` are not independent positive evidence, and an alert percentage is never treated as RVOL unless an explicit RV field exists.
+
+AI reviews are saved in the local SQLite `ai_reviews` table so reopening the ticker shows the latest review. Existing v1 reviews remain readable; new reviews are stored as review version 2.
 
 ### Listener & System
 
@@ -122,7 +136,9 @@ The old scripts such as `show_ticker_memory.bat`, `show_attention_list.bat`, and
 - [x] Explainable attention ranking
 - [x] Desktop dashboard
 - [x] Manual AI candidate review
-- [ ] Tune attention + AI review logic from real observed outcomes
+- [x] AI review v2: separate interest/risk/evidence/status + deterministic guardrails
+- [ ] Collect and compare roughly 20-30 real reviews/outcomes for calibration
+- [ ] Tune attention + AI review logic from observed outcomes
 - [ ] Decide which AI-reviewed setups deserve a user-facing candidate alert
 - [ ] Optionally automate AI review only for high-quality local candidates
 - [ ] Add trade-candidate notification layer
