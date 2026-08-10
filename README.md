@@ -1,10 +1,12 @@
 # TrendVisionAI
 
-TrendVisionAI is a local Windows decision-support dashboard that captures TrendVision Discord scanner notifications, builds per-ticker memory, tracks HIGH ATTENTION cases with Alpaca market data, evaluates screenshot-enhanced trade plans, and calibrates what actually happened afterward.
+TrendVisionAI is a local Windows decision-support dashboard that captures TrendVision Discord scanner notifications, builds per-ticker memory, tracks HIGH ATTENTION cases with Alpaca market data, evaluates trade plans, and calibrates what actually happened afterward.
 
 ## Product goal
 
-The practical end product is a **human-executed trade alert**. When the system has enough evidence, TrendVisionAI should alert the user with a candidate, entry zone, stop loss, targets, risk/reward and the evidence behind the alert. The application does **not** place brokerage orders.
+The practical end product is a **human-executed trade alert**. When the system has enough evidence and the current setup passes all live checks, TrendVisionAI should alert the user with a candidate, entry zone, stop loss, targets, risk/reward and the evidence behind the alert. The application does **not** place brokerage orders.
+
+The system learns **setup conditions across many tickers**, not whether one particular stock symbol was historically good.
 
 ## Current workflow
 
@@ -19,21 +21,38 @@ Read-only Alpaca tracking
         ↓
 Automatic market outcomes + Calibration Statistics
         ↓
-Trade Plan v3 (user-supplied current chart)
+Trade Plan v3 experiments
         ↓
-REJECT / WATCH / POTENTIAL TRADE
-        ↓
-If POTENTIAL TRADE:
-Entry + Stop + T1 + T2 + R/R
-        ↓
-Objective trade-plan follow-up
+Objective Entry / Stop / T1 / T2 follow-up
         ↓
 Trade Plan Statistics
         ↓
-Experimental Candidate Qualification
+Candidate Qualification
+        ↓
+Automatic live pipeline
 ```
 
-The user remains the person who decides whether to trade.
+During regular US market hours, the automatic live pipeline can now run:
+
+```text
+HIGH ATTENTION
+      ↓
+Automatic qualification check
+      ↓
+Automatic Alpaca 1-minute chart context
+      ↓
+Automatic Trade Plan v3
+      ↓
+POTENTIAL TRADE?
+      ↓
+Deterministic hard alert gate
+      ↓
+🚨 Windows/dashboard Trade Alert
+      ↓
+User manually decides whether to trade
+```
+
+Before qualification evidence is mature, the same automatic chart + Trade Plan path can run in **calibration-only mode** so the dataset continues growing without generating a user-facing trade alert.
 
 ## Setup / launch
 
@@ -42,7 +61,7 @@ scripts\setup.bat
 scripts\run_ui.bat
 ```
 
-The UI starts its Windows notification listener and read-only market tracker automatically.
+The UI starts its Windows notification listener, read-only market tracker and live pipeline automatically.
 
 ## Main capabilities
 
@@ -54,14 +73,18 @@ The UI starts its Windows notification listener and read-only market tracker aut
 - Alpaca read-only tracking for HIGH ATTENTION cases.
 - Automatic 15m / 30m / 60m / 4h market-path outcomes.
 - Detection-time Calibration Statistics by scanner combination, signal, RV, extension, market cap and risk conditions.
-- Screenshot-enhanced Trade Plan v3.
+- Manual screenshot-enhanced Trade Plan v3.
 - Experimental Entry / Stop / T1 / T2 persistence and objective follow-up.
 - Trade Plan Statistics grouped by detection-time conditions and plan characteristics.
 - Candidate Qualification v1 that remains evidence-locked until enough resolved plan history exists.
+- Automatic recent Alpaca 1-minute chart acquisition/rendering for live calibration and qualified candidates.
+- Automatic Trade Plan v3 execution for new HIGH ATTENTION tracking sessions during regular hours.
+- Qualified-candidate Windows notifications with persistent deduplication.
+- Final deterministic alert gate and Windows/dashboard trade alerts when a qualified POTENTIAL TRADE passes all blockers.
 
 ## Trade Plan v3
 
-Ticker Memory lets the user paste or choose a current chart screenshot. OpenAI receives the underlying chart image plus stored TrendVision evidence and current usable Alpaca context.
+Ticker Memory still lets the user paste or choose a current chart screenshot manually. OpenAI receives the underlying chart image plus stored TrendVision evidence and current usable Alpaca context.
 
 Trade Plan v3 specifically:
 
@@ -69,13 +92,24 @@ Trade Plan v3 specifically:
 - does not treat a freshly downloaded snapshot as proof that its latest trade is current;
 - treats `IEX` as partial-venue data, not consolidated SIP/NBBO;
 - treats legacy `zero_borrow=false` as UNKNOWN unless an explicit 0-borrow observation exists;
-- ignores BUY / SELL / ENTRY / SL / TP recommendations printed by another tool inside the screenshot;
+- ignores BUY / SELL / ENTRY / SL / TP recommendations printed by another tool inside a manual screenshot;
 - does not directly compare differently defined TrendVision RV/volume with Alpaca IEX volume;
 - blocks actionable plans when current market context is stale or otherwise unusable;
 - blocks a fresh observed spread of 15%+ from producing `POTENTIAL TRADE` levels;
 - keeps deterministic long-side coherence checks for Entry / Stop / T1 / T2.
 
-The screenshot is used for underlying chart structure such as candles, wicks, breakout/pullback shape, consolidation, support/resistance and visible VWAP/EMA relationships. Exact current numerical market context comes from fresh usable Alpaca observations.
+## Automatic chart context
+
+For the live pipeline, TrendVisionAI requests recent Alpaca **1-minute bars** for the ticker and renders its own neutral candlestick/volume image under `data/auto_trade_charts/`.
+
+The generated chart:
+
+- contains no BUY / SELL / SL / TP recommendations;
+- is paired with the same structured bar list sent to the model;
+- is used for trend, candle, wick, pullback, consolidation and support/resistance structure;
+- inherits the limitations of the configured Alpaca feed. With the default free `IEX` feed it remains partial-venue evidence.
+
+Exact current planning price/quote still comes from fresh Trade Plan v3 market context rather than from pixels in the generated chart.
 
 ## Calibration Statistics
 
@@ -126,16 +160,14 @@ These are evidence-maturity labels, not guaranteed win rates, statistical proof 
 
 ## Candidate Qualification v1
 
-The **Candidate Qualification** page is the first implementation of the evidence gate that will eventually sit before the final trade alert.
-
-It matches a current HIGH ATTENTION ticker's frozen detection-time conditions against resolved Trade Plan history and returns one of:
+Candidate Qualification matches a current HIGH ATTENTION ticker's frozen detection-time conditions against resolved Trade Plan history and returns one of:
 
 - `INSUFFICIENT EVIDENCE`
 - `MONITOR`
 - `MONITOR / RISK`
 - `EXPERIMENTALLY QUALIFIED`
 
-Current conservative readiness gates are intentionally hard-coded and transparent:
+Current transparent readiness gates:
 
 - at least **30 resolved entered Trade Plan cases globally** before qualification is enabled;
 - at least **15 resolved cases** for a matched pattern before that pattern is mature enough to vote;
@@ -144,7 +176,31 @@ Current conservative readiness gates are intentionally hard-coded and transparen
 - at least two **specific** mature positive matched patterns are required, with no mature specific negative match, before a ticker becomes `EXPERIMENTALLY QUALIFIED`;
 - generic `ALL HIGH ATTENTION` evidence does not count as one of those positive patterns.
 
-These thresholds are the initial transparent calibration framework. They are not claims that these values are statistically optimal. The qualification page does **not** generate Entry / Stop / Targets and does not send a final trade alert. An experimentally qualified ticker must still go through fresh chart + Trade Plan analysis.
+These thresholds are an initial transparent calibration framework, not claims that the values are statistically optimal.
+
+## Live Trade Pipeline
+
+The **Live Trade Pipeline** page records the automatic workflow and its deduplicated events.
+
+A HIGH ATTENTION session can receive one automatic calibration Trade Plan during the configured regular session when fresh Alpaca context and credentials are available. This helps the Trade Plan dataset grow even while Candidate Qualification is still evidence-locked.
+
+When a ticker is `EXPERIMENTALLY QUALIFIED`, TrendVisionAI also records/notifies the qualified candidate. If its automatic Trade Plan returns `POTENTIAL TRADE`, the final alert gate requires all of the following before a trade alert can be emitted:
+
+- regular US equity session (configured 09:30-16:00 America/New_York);
+- historical status = `EXPERIMENTALLY QUALIFIED`;
+- Trade Plan decision = `POTENTIAL TRADE`;
+- fresh usable market context;
+- a fresh quote;
+- known observed spread below the configured 15% guardrail;
+- coherent Entry / Stop / T1 / T2;
+- no `EXTREME` plan risk;
+- chart structure not `DANGEROUS` / `UNCLEAR`;
+- no multiple recent halt observations;
+- no previous final alert for the same tracking session.
+
+The local clock gate is intentionally simple; stale/unusable market data remains an independent blocker when the exchange is not actually producing current data.
+
+A final notification contains Entry, Stop, T1 and T2 and is explicitly for **manual user decision/execution only**.
 
 ## UI screens
 
@@ -158,6 +214,7 @@ These thresholds are the initial transparent calibration framework. They are not
 - Trade Plan Experiments
 - Trade Plan Statistics
 - Candidate Qualification
+- Live Trade Pipeline
 
 ## Storage
 
@@ -166,6 +223,7 @@ data\trendvision.db
 data\raw_notifications.jsonl
 data\winrt_candidates.jsonl
 data\trade_plan_images\...
+data\auto_trade_charts\...
 ```
 
 Important SQLite layers include:
@@ -180,6 +238,7 @@ Important SQLite layers include:
 - `calibration_feature_snapshots`
 - `trade_plans`
 - `trade_plan_evaluations`
+- `live_pipeline_events`
 
 `data/*` is gitignored. API credentials are stored through Windows Credential Manager rather than in the repository.
 
@@ -201,11 +260,14 @@ Important SQLite layers include:
 - [x] Objective post-plan evaluation
 - [x] Trade Plan Statistics
 - [x] Candidate Qualification v1 framework / readiness gate
+- [x] Automatic qualification checks in the live pipeline
+- [x] Qualified-candidate notification + persistent deduplication
+- [x] Automatic Alpaca 1-minute chart context
+- [x] Automatic Trade Plan stage
+- [x] Deterministic final alert blockers
+- [x] Windows/dashboard Entry / Stop / T1 / T2 trade alert path
 - [ ] Collect enough real trade-plan cases for mature pattern evidence
 - [ ] Tune/freeze qualification rules from accumulated evidence
-- [ ] Automate the chart/trade-plan stage for qualified candidates
-- [ ] Add final Windows/dashboard trade alert with Entry / Stop / T1 / T2 / R/R
-- [ ] Add duplicate-alert cooldown and final alert blockers
 - [ ] Validate frozen alert rules on new out-of-sample cases
 - [ ] User manually decides and executes trades
 
