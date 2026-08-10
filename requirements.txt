@@ -6,3 +6,5 @@ winrt-Windows.ApplicationModel==3.2.1
 winrt-Windows.UI.Notifications==3.2.1
 winrt-Windows.UI.Notifications.Management==3.2.1
 PySide6==6.11.1
+openai>=1.68.0,<3
+keyring>=25,<26
