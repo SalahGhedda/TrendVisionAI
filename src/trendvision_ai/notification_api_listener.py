@@ -98,6 +98,22 @@ def _print_saved(notification, saved: bool, event_saved: bool | None = None) -> 
     print("=" * 72, flush=True)
 
 
+def _refresh_and_print_memory(store: AlertStore, tickers: list[str], window_minutes: int = 30) -> None:
+    for ticker in dict.fromkeys(value.upper() for value in tickers if value):
+        state = store.refresh_ticker_state(ticker)
+        if state is None:
+            continue
+        summary = store.get_convergence_summary(ticker, window_minutes=window_minutes)
+        channels = ", ".join(summary["channels"]) or "-"
+        print(
+            f"TICKER MEMORY | {ticker} | total={state.event_count} events / "
+            f"{state.channel_count} channels | recent {window_minutes}m="
+            f"{summary['event_count']} events / {summary['channel_count']} channels "
+            f"[{channels}]",
+            flush=True,
+        )
+
+
 async def main() -> int:
     args = _build_parser().parse_args()
 
@@ -131,6 +147,9 @@ async def main() -> int:
     seen_ids: set[tuple[str, int | str]] = set()
     scans = 0
 
+    # Backfill the durable ticker_state table from everything already captured.
+    rebuilt = store.rebuild_ticker_states()
+
     print("TrendVisionAI - Continuous Windows Notification Listener")
     print("Notification access: ALLOWED")
     print(f"Polling every {int(poll_seconds * 1000)} ms")
@@ -138,6 +157,7 @@ async def main() -> int:
     print("Press Ctrl+C to stop.")
     print(f"Database: {config.database_path}")
     print(f"Raw WinRT log: {raw_candidate_path}")
+    print(f"Ticker memory loaded: {rebuilt} ticker(s)")
 
     try:
         while True:
@@ -186,6 +206,10 @@ async def main() -> int:
                 event_results = [store.save_scanner_event(event) for event in events]
                 event_saved = all(event_results) if event_results else None
                 _print_saved(captured, saved, event_saved)
+
+                tickers = [event.ticker for event in events if event.ticker]
+                if tickers:
+                    _refresh_and_print_memory(store, tickers)
 
             if scans % max(1, int(15 / poll_seconds)) == 0:
                 print(
