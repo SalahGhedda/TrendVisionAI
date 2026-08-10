@@ -24,5 +24,5 @@ if not exist config.json copy /Y config.example.json config.json >nul
 
 echo [4/4] Done.
 echo.
-echo Next: double-click scripts\run_listener.bat
+echo Next: double-click scripts\run_ui.bat
 pause
