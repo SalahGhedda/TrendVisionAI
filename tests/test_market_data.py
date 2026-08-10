@@ -1,6 +1,8 @@
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from trendvision_ai.market_data import MarketDataStore, parse_snapshot
+from trendvision_ai.review_outcomes import ReviewOutcomeStore
 
 
 def test_parse_snapshot_extracts_trade_quote_and_bar():
@@ -106,3 +108,140 @@ def test_market_store_builds_reference_mfe_and_mae(tmp_path: Path):
     assert round(metrics["mfe_pct"], 2) == 10.0
     assert round(metrics["mae_pct"], 2) == -10.0
     assert metrics["sample_count"] == 2
+
+
+def _sample(
+    ticker: str,
+    captured_at: datetime,
+    *,
+    price: float,
+    minute: str,
+    high: float,
+    low: float,
+    volume: float,
+):
+    return {
+        "ticker": ticker,
+        "captured_at": captured_at.isoformat(timespec="seconds"),
+        "feed": "iex",
+        "trade_price": price,
+        "trade_size": 10,
+        "trade_timestamp": captured_at.isoformat(timespec="seconds"),
+        "bid": price - 0.01,
+        "ask": price + 0.01,
+        "bid_size": 100,
+        "ask_size": 100,
+        "quote_timestamp": captured_at.isoformat(timespec="seconds"),
+        "spread": 0.02,
+        "spread_pct": 0.2,
+        "minute_timestamp": minute,
+        "minute_open": price,
+        "minute_high": high,
+        "minute_low": low,
+        "minute_close": price,
+        "minute_volume": volume,
+        "minute_vwap": price,
+        "day_volume": 10000,
+        "raw_json": "{}",
+    }
+
+
+def test_review_metrics_use_review_timestamp_and_ignore_partial_reference_bar(tmp_path: Path):
+    database = tmp_path / "review-market.db"
+    store = MarketDataStore(database)
+    session = store.ensure_session(
+        ticker="TEST",
+        trigger_tier="HIGH ATTENTION",
+        trigger_score=12,
+        feed="iex",
+    )
+
+    review_time = datetime.now(timezone.utc).astimezone() - timedelta(minutes=20)
+    store.save_sample(
+        session["id"],
+        _sample(
+            "TEST",
+            review_time + timedelta(seconds=5),
+            price=10.0,
+            minute="minute-0",
+            high=99.0,
+            low=1.0,
+            volume=100,
+        ),
+    )
+    store.save_sample(
+        session["id"],
+        _sample(
+            "TEST",
+            review_time + timedelta(minutes=5),
+            price=11.0,
+            minute="minute-5",
+            high=12.0,
+            low=9.0,
+            volume=200,
+        ),
+    )
+    store.save_sample(
+        session["id"],
+        _sample(
+            "TEST",
+            review_time + timedelta(minutes=14, seconds=50),
+            price=12.0,
+            minute="minute-14",
+            high=13.0,
+            low=11.0,
+            volume=300,
+        ),
+    )
+
+    metrics = store.review_metrics(
+        ticker="TEST",
+        review_created_at=review_time.isoformat(timespec="seconds"),
+        horizon_minutes=15,
+    )
+
+    assert metrics["available"] is True
+    assert metrics["reference_price"] == 10.0
+    assert round(metrics["return_pct"], 4) == 20.0
+    assert round(metrics["mfe_pct"], 4) == 30.0
+    assert round(metrics["mae_pct"], 4) == -10.0
+    assert metrics["max_minute_volume"] == 300
+    assert metrics["sample_count"] == 3
+    assert metrics["peak_price"] == 13.0
+    assert metrics["trough_price"] == 9.0
+
+
+def test_saved_review_outcome_keeps_objective_market_snapshot(tmp_path: Path):
+    store = ReviewOutcomeStore(tmp_path / "outcomes.db")
+    market = {
+        "available": True,
+        "target_minutes": 30,
+        "reference_price": 5.0,
+        "return_pct": 8.0,
+        "mfe_pct": 15.0,
+        "mae_pct": -4.0,
+        "sample_count": 100,
+    }
+
+    store.save_outcome(
+        review_id=42,
+        ticker="TEST",
+        horizon_minutes=30,
+        outcome="MODEST CONTINUATION",
+        notes="objective calibration sample",
+        followup={
+            "event_count": 2,
+            "channel_count": 2,
+            "channels": ["a", "b"],
+        },
+        market_metrics=market,
+    )
+
+    saved = store.get_outcome(42)
+    assert saved is not None
+    assert saved["market_reference_price"] == 5.0
+    assert saved["market_return_pct"] == 8.0
+    assert saved["market_mfe_pct"] == 15.0
+    assert saved["market_mae_pct"] == -4.0
+    assert saved["market_sample_count"] == 100
+    assert saved["market_metrics"]["target_minutes"] == 30
