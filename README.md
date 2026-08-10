@@ -21,8 +21,9 @@ The app currently:
 11. Freezes detection-time TrendVision conditions and builds aggregate calibration statistics.
 12. Lets the user paste or choose a **current chart screenshot** for a HIGH ATTENTION ticker.
 13. Sends the screenshot together with stored TrendVision evidence and latest Alpaca measurements to the OpenAI Responses API for an experimental multimodal trade-plan review.
-14. Saves potential entry / stop / T1 / T2 plans only when deterministic long-plan guardrails pass.
-15. Automatically follows each saved plan with Alpaca samples to measure whether the proposed entry was observed and whether stop / T1 / T2 were subsequently observed.
+14. Uses Trade Plan v2 freshness/feed-scope guardrails so stale or delayed market observations cannot produce actionable levels.
+15. Saves potential entry / stop / T1 / T2 plans only when deterministic long-plan guardrails pass.
+16. Automatically follows each saved plan with Alpaca samples to measure whether the proposed entry was observed and whether stop / T1 / T2 were subsequently observed.
 
 There is **no brokerage integration or automatic order execution**. Alpaca is read-only market data; TrendVision remains discovery; the user remains the person who decides whether to trade.
 
@@ -60,7 +61,7 @@ Automatic 15m / 30m / 60m / 4h outcomes
 Calibration Statistics
 ```
 
-The new optional trade-plan experiment runs in parallel:
+The optional trade-plan experiment runs in parallel:
 
 ```text
 HIGH ATTENTION ticker
@@ -68,7 +69,7 @@ HIGH ATTENTION ticker
 User pastes current chart screenshot
         ↓
 TrendVision evidence
-+ latest Alpaca measurements
++ fresh Alpaca measurements
 + chart screenshot
         ↓
 OpenAI multimodal review
@@ -103,9 +104,9 @@ It also contains:
 
 - **AI Candidate Review v3** — manual TrendVision-only second-pass review.
 - **Automatic Outcome Calibration** — objective post-review 15m / 30m / 60m / 4h behavior.
-- **Trade Plan Experiment v1** — paste or choose the current chart screenshot, then analyze the current case with TrendVision + Alpaca + chart vision.
+- **Trade Plan Experiment v2** — paste or choose the current chart screenshot, then analyze the current case with TrendVision + Alpaca + chart vision.
 
-For Trade Plan Experiment v1, a `POTENTIAL TRADE` can contain:
+For Trade Plan Experiment v2, a `POTENTIAL TRADE` can contain:
 
 - entry zone
 - stop loss
@@ -118,9 +119,20 @@ For Trade Plan Experiment v1, a `POTENTIAL TRADE` can contain:
 - positive/risk factors
 - what still needs confirmation
 
-If the model returns incoherent long-side levels, EXTREME risk, dangerous/unclear chart structure, multiple recent halts, or a 100%+ recent move, deterministic v1 guardrails prevent the case from being promoted to `POTENTIAL TRADE` and actionable levels are removed.
+V2 adds calibration rules learned from the first real screenshot test:
 
-Chart vision is used for qualitative structure. Exact numeric market values come from the stored Alpaca snapshot supplied to the request.
+- the latest Alpaca sample must be no more than **45 seconds old** before the OpenAI trade-plan request is allowed;
+- delayed SIP is never treated as a current quote for actionable levels;
+- `IEX` is explicitly treated as **partial-venue data**, not consolidated SIP/NBBO;
+- different prices at different timestamps are normal time-series observations, not automatic conflicts;
+- different RV values are not called contradictory unless their calculation windows/baselines are known to be directly comparable;
+- small float/market cap can increase volatility, slippage and liquidity sensitivity but does not by itself prove manipulation or a pump;
+- one IEX quote/size observation is not treated as full-market depth;
+- `what to confirm` is constrained to observations TrendVisionAI can actually obtain from subsequent Alpaca samples, supported TrendVision alerts, or a newer chart screenshot.
+
+The existing deterministic long-plan checks also remain: incoherent price levels, EXTREME risk, dangerous/unclear chart structure, multiple recent halts, or a 100%+ recent move cannot be promoted to a clean `POTENTIAL TRADE` without further confirmation.
+
+Chart vision is used for qualitative structure. Exact numeric market values come from fresh stored Alpaca observations supplied to the request.
 
 ### Calibration Journal
 
@@ -246,6 +258,7 @@ Main SQLite layers:
 - [x] Aggregate calibration statistics
 - [x] Manual chart screenshot input
 - [x] Multimodal TrendVision + Alpaca + chart Trade Plan Experiment v1
+- [x] Trade Plan v2 freshness/feed-scope/reasoning guardrails
 - [x] Persist entry / stop / T1 / T2 experiments
 - [x] Objective post-plan sampled-price evaluation
 - [ ] Collect enough real HIGH ATTENTION and trade-plan cases for meaningful calibration
