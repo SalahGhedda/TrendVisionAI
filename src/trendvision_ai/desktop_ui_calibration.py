@@ -27,6 +27,50 @@ from .review_outcomes import HORIZON_OPTIONS, OUTCOME_OPTIONS, ReviewOutcomeStor
 ai.analyze_snapshot = analyze_snapshot_v3
 
 
+def _price(value: Any) -> str:
+    try:
+        return f"${float(value):.4f}" if value is not None else "-"
+    except (TypeError, ValueError):
+        return "-"
+
+
+def _pct(value: Any) -> str:
+    try:
+        return f"{float(value):+.2f}%" if value is not None else "-"
+    except (TypeError, ValueError):
+        return "-"
+
+
+def _market_summary_text(market: dict[str, Any]) -> str:
+    if not market.get("available"):
+        return "No Alpaca samples after this review yet."
+    progress = "complete" if market.get("horizon_complete") else "in progress"
+    target = int(market.get("target_minutes") or 0)
+    coverage = float(market.get("coverage_minutes") or 0.0)
+    return (
+        f"Alpaca: {_price(market.get('reference_price'))} → {_price(market.get('last_price'))} "
+        f"| Return {_pct(market.get('return_pct'))} | MFE {_pct(market.get('mfe_pct'))} "
+        f"| MAE {_pct(market.get('mae_pct'))} | {int(market.get('sample_count') or 0)} samples "
+        f"| coverage {coverage:.1f}/{target} min ({progress})."
+    )
+
+
+def _market_table_text(market: dict[str, Any]) -> tuple[str, str]:
+    if not market.get("available"):
+        return "-", "No Alpaca data"
+    outcome = (
+        f"R {_pct(market.get('return_pct'))} | "
+        f"MFE {_pct(market.get('mfe_pct'))} | MAE {_pct(market.get('mae_pct'))}"
+    )
+    target = int(market.get("target_minutes") or 0)
+    coverage = float(market.get("coverage_minutes") or 0.0)
+    state = "done" if market.get("horizon_complete") else "live"
+    coverage_text = (
+        f"{coverage:.1f}/{target}m • {int(market.get('sample_count') or 0)} samples • {state}"
+    )
+    return outcome, coverage_text
+
+
 class CalibrationTickerMemoryPage(ai.AITickerMemoryPage):
     def __init__(self, repo: ai.base.DashboardRepository) -> None:
         super().__init__(repo)
@@ -46,7 +90,7 @@ class CalibrationTickerMemoryPage(ai.AITickerMemoryPage):
         title = QLabel("Review Outcome Journal")
         title.setStyleSheet("font-size: 12pt; font-weight: 600;")
         subtitle = QLabel(
-            "After enough time has passed, label what actually happened. These labels become our calibration dataset before any automatic AI review is enabled."
+            "After enough time has passed, label what actually happened. TrendVision follow-up and objective Alpaca measurements are saved together for calibration."
         )
         subtitle.setObjectName("muted")
         subtitle.setWordWrap(True)
@@ -71,10 +115,17 @@ class CalibrationTickerMemoryPage(ai.AITickerMemoryPage):
         row.addWidget(save)
         layout.addLayout(row)
 
-        self.followup_status = QLabel("Analyze a ticker first, then return later to label the outcome.")
+        self.followup_status = QLabel(
+            "Analyze a ticker first, then return later to label the outcome."
+        )
         self.followup_status.setObjectName("muted")
         self.followup_status.setWordWrap(True)
         layout.addWidget(self.followup_status)
+
+        self.market_outcome_status = QLabel("Objective market outcome: waiting for a review.")
+        self.market_outcome_status.setObjectName("muted")
+        self.market_outcome_status.setWordWrap(True)
+        layout.addWidget(self.market_outcome_status)
 
         self.outcome_notes = QTextEdit()
         self.outcome_notes.setMaximumHeight(75)
@@ -108,6 +159,9 @@ class CalibrationTickerMemoryPage(ai.AITickerMemoryPage):
             self.followup_status.setText(
                 f"No AI review exists for {self.current_ticker} yet."
             )
+            self.market_outcome_status.setText(
+                "Objective market outcome: create an AI review first so measurements have a reference timestamp."
+            )
             if load_saved:
                 self.outcome_combo.setCurrentText("NOT LABELED")
                 self.outcome_notes.clear()
@@ -140,6 +194,11 @@ class CalibrationTickerMemoryPage(ai.AITickerMemoryPage):
             review_created_at=record["created_at"],
             horizon_minutes=horizon,
         )
+        market = self.outcome_store.market_summary(
+            ticker=record["ticker"],
+            review_created_at=record["created_at"],
+            horizon_minutes=horizon,
+        )
         channels = ", ".join(followup["channels"]) or "none"
         result = record.get("result") or {}
         status = result.get("review_status") or result.get("verdict") or "-"
@@ -148,6 +207,7 @@ class CalibrationTickerMemoryPage(ai.AITickerMemoryPage):
             f"{followup['event_count']} later TrendVision event(s) across "
             f"{followup['channel_count']} channel(s) within {horizon} min [{channels}]."
         )
+        self.market_outcome_status.setText(_market_summary_text(market))
 
     def save_outcome(self) -> None:
         record = self.current_review_record
@@ -164,6 +224,11 @@ class CalibrationTickerMemoryPage(ai.AITickerMemoryPage):
             review_created_at=record["created_at"],
             horizon_minutes=horizon,
         )
+        market = self.outcome_store.market_summary(
+            ticker=record["ticker"],
+            review_created_at=record["created_at"],
+            horizon_minutes=horizon,
+        )
         self.outcome_store.save_outcome(
             review_id=record["id"],
             ticker=record["ticker"],
@@ -171,10 +236,14 @@ class CalibrationTickerMemoryPage(ai.AITickerMemoryPage):
             outcome=outcome,
             notes=self.outcome_notes.toPlainText(),
             followup=followup,
+            market_metrics=market,
         )
+        suffix = ""
+        if market.get("available") and not market.get("horizon_complete"):
+            suffix = " The selected market horizon is still in progress, so the saved metrics are a partial snapshot."
         self.followup_status.setText(
             f"Outcome saved for review #{record['id']}: {outcome}. "
-            "This sample is now part of the local calibration journal."
+            f"TrendVision follow-up and Alpaca measurements are now part of the calibration sample.{suffix}"
         )
 
 
@@ -192,7 +261,7 @@ class CalibrationPage(QWidget):
         title = QLabel("Calibration Journal")
         title.setObjectName("pageTitle")
         subtitle = QLabel(
-            "Real AI reviews plus your later outcome labels. Goal: collect roughly 20–30 useful samples before considering automatic AI review."
+            "AI reviews, human outcome labels, TrendVision follow-up and objective Alpaca return/MFE/MAE measurements. Goal: collect enough real samples before automating review decisions."
         )
         subtitle.setObjectName("muted")
         subtitle.setWordWrap(True)
@@ -203,17 +272,19 @@ class CalibrationPage(QWidget):
         self.total_card = ai.base.MetricCard("AI reviews")
         self.labeled_card = ai.base.MetricCard("Outcomes labeled")
         self.unlabeled_card = ai.base.MetricCard("Waiting for outcome")
+        self.market_card = ai.base.MetricCard("Reviews with market data")
         self.extreme_card = ai.base.MetricCard("Extreme-risk reviews")
         for card in (
             self.total_card,
             self.labeled_card,
             self.unlabeled_card,
+            self.market_card,
             self.extreme_card,
         ):
             metrics.addWidget(card)
         root.addLayout(metrics)
 
-        self.table = QTableWidget(0, 8)
+        self.table = QTableWidget(0, 10)
         self.table.setHorizontalHeaderLabels(
             [
                 "Reviewed",
@@ -223,6 +294,8 @@ class CalibrationPage(QWidget):
                 "Evidence",
                 "Status",
                 "Outcome",
+                "Market outcome",
+                "Market coverage",
                 "Post-review alerts",
             ]
         )
@@ -234,6 +307,8 @@ class CalibrationPage(QWidget):
         for column in range(7):
             header.setSectionResizeMode(column, QHeaderView.ResizeToContents)
         header.setSectionResizeMode(7, QHeaderView.Stretch)
+        header.setSectionResizeMode(8, QHeaderView.ResizeToContents)
+        header.setSectionResizeMode(9, QHeaderView.Stretch)
         self.table.cellDoubleClicked.connect(self._open_ticker)
         root.addWidget(self.table, 1)
 
@@ -257,24 +332,46 @@ class CalibrationPage(QWidget):
             )
         )
 
-        self.table.setRowCount(len(reviews))
-        for row, item in enumerate(reviews):
-            review = item.get("review") or {}
+        rows_for_ui: list[tuple[dict[str, Any], dict[str, Any], str]] = []
+        market_covered = 0
+        for item in reviews:
             if item["outcome"] == "NOT LABELED":
+                horizon = 30
                 followup = self.store.post_review_summary(
                     ticker=item["ticker"],
                     review_created_at=item["created_at"],
-                    horizon_minutes=30,
+                    horizon_minutes=horizon,
                 )
                 followup_text = (
                     f"{followup['event_count']} events / {followup['channel_count']} channels (30m)"
                 )
+                market = self.store.market_summary(
+                    ticker=item["ticker"],
+                    review_created_at=item["created_at"],
+                    horizon_minutes=horizon,
+                )
             else:
+                horizon = int(item.get("horizon_minutes") or 30)
                 followup_text = (
                     f"{item['followup_event_count']} events / "
                     f"{item['followup_channel_count']} channels"
                 )
+                market = item.get("market_metrics") or {}
+                if not market.get("available"):
+                    market = self.store.market_summary(
+                        ticker=item["ticker"],
+                        review_created_at=item["created_at"],
+                        horizon_minutes=horizon,
+                    )
+            if market.get("available"):
+                market_covered += 1
+            rows_for_ui.append((item, market, followup_text))
 
+        self.market_card.set_value(market_covered)
+        self.table.setRowCount(len(rows_for_ui))
+        for row, (item, market, followup_text) in enumerate(rows_for_ui):
+            review = item.get("review") or {}
+            market_text, coverage_text = _market_table_text(market)
             values = [
                 ai.base._display_time(item["created_at"]),
                 item["ticker"],
@@ -283,6 +380,8 @@ class CalibrationPage(QWidget):
                 review.get("evidence_quality") or review.get("confidence") or "-",
                 review.get("review_status") or review.get("verdict") or "-",
                 item["outcome"],
+                market_text,
+                coverage_text,
                 followup_text,
             ]
             for column, value in enumerate(values):
