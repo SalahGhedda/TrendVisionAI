@@ -20,4 +20,4 @@ if errorlevel 1 (
 set PYTHONUTF8=1
 set PYTHONIOENCODING=utf-8
 set PYTHONPATH=%CD%\src
-.venv\Scripts\python.exe -m trendvision_ai.desktop_ui_fast
+.venv\Scripts\python.exe -m trendvision_ai.desktop_ui_fast_v2
