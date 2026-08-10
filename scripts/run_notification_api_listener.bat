@@ -9,6 +9,9 @@ if not exist .venv\Scripts\python.exe (
     exit /b 1
 )
 
+chcp 65001 >nul
+set PYTHONUTF8=1
+set PYTHONIOENCODING=utf-8
 set PYTHONPATH=%CD%\src
 .venv\Scripts\python.exe -m trendvision_ai.notification_api_listener --config config.json
 
