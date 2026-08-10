@@ -38,12 +38,13 @@ class CandidateQualificationEngine:
         return connection
 
     def latest_session_for_ticker(self, ticker: str) -> dict[str, Any] | None:
+        """Return only the active session used by the current live candidate."""
         try:
             with self._connect() as connection:
                 row = connection.execute(
                     """
                     SELECT * FROM market_tracking_sessions
-                    WHERE UPPER(ticker)=?
+                    WHERE UPPER(ticker)=? AND status='ACTIVE'
                     ORDER BY started_at DESC, id DESC
                     LIMIT 1
                     """,
@@ -182,7 +183,7 @@ class CandidateQualificationEngine:
                 "qualification_version": QUALIFICATION_VERSION,
                 "ticker": ticker.upper().strip(),
                 "status": "INSUFFICIENT EVIDENCE",
-                "reason": "No market tracking session exists for this ticker yet.",
+                "reason": "No active HIGH ATTENTION market-tracking session exists for this ticker yet.",
                 "global_resolved": int(self.trade_stats.overview().get("resolved_count") or 0),
                 "positive_patterns": [],
                 "negative_patterns": [],
