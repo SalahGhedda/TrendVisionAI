@@ -16,6 +16,7 @@ POSITIVE_T1_RATE_PCT = 60.0
 MAX_POSITIVE_STOP_FIRST_PCT = 30.0
 NEGATIVE_T1_RATE_PCT = 30.0
 NEGATIVE_STOP_FIRST_PCT = 50.0
+NON_SPECIFIC_PATTERNS = {"ALL HIGH ATTENTION", "ALL POTENTIAL TRADE"}
 
 
 class CandidateQualificationEngine:
@@ -102,12 +103,25 @@ class CandidateQualificationEngine:
                 continue
             item = dict(row)
             item["classification"] = self._pattern_classification(item)
+            item["specific"] = str(item.get("pattern") or "") not in NON_SPECIFIC_PATTERNS
             matched.append(item)
 
-        positives = [row for row in matched if row["classification"] == "POSITIVE"]
-        negatives = [row for row in matched if row["classification"] == "NEGATIVE"]
-        neutrals = [row for row in matched if row["classification"] == "NEUTRAL"]
-        immature = [row for row in matched if row["classification"] == "IMMATURE"]
+        positives = [
+            row for row in matched
+            if row["classification"] == "POSITIVE" and row.get("specific")
+        ]
+        negatives = [
+            row for row in matched
+            if row["classification"] == "NEGATIVE" and row.get("specific")
+        ]
+        neutrals = [
+            row for row in matched
+            if row["classification"] == "NEUTRAL" and row.get("specific")
+        ]
+        immature = [
+            row for row in matched
+            if row["classification"] == "IMMATURE" and row.get("specific")
+        ]
 
         if global_resolved < MIN_GLOBAL_RESOLVED:
             status = "INSUFFICIENT EVIDENCE"
@@ -118,24 +132,24 @@ class CandidateQualificationEngine:
         elif negatives:
             status = "MONITOR / RISK"
             reason = (
-                f"{len(negatives)} mature matched detection pattern(s) currently show unfavorable trade-plan follow-up. "
+                f"{len(negatives)} mature specific matched detection pattern(s) currently show unfavorable trade-plan follow-up. "
                 "Do not promote automatically."
             )
         elif len(positives) >= MIN_POSITIVE_PATTERNS:
             status = "EXPERIMENTALLY QUALIFIED"
             reason = (
-                f"{len(positives)} mature matched detection pattern(s) meet the current conservative trade-plan thresholds "
-                "and no mature negative pattern matched. This still requires the trade-plan/chart stage."
+                f"{len(positives)} mature specific matched detection pattern(s) meet the current conservative trade-plan thresholds "
+                "and no mature specific negative pattern matched. This still requires the trade-plan/chart stage."
             )
         elif positives:
             status = "MONITOR"
             reason = (
-                f"Only {len(positives)} mature positive matched pattern(s) exist; "
+                f"Only {len(positives)} mature specific positive matched pattern(s) exist; "
                 f"v1 requires at least {MIN_POSITIVE_PATTERNS} before experimental qualification."
             )
         else:
             status = "MONITOR"
-            reason = "No mature matched detection pattern currently provides enough positive trade-plan evidence."
+            reason = "No mature specific matched detection pattern currently provides enough positive trade-plan evidence."
 
         return {
             "qualification_version": QUALIFICATION_VERSION,
