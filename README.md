@@ -1,110 +1,92 @@
 # TrendVisionAI
 
-A local, read-only Windows listener for TrendVision scanner notifications from Discord.
+TrendVisionAI is a local Windows dashboard that captures TrendVision Discord scanner notifications, turns them into structured events, and accumulates per-ticker memory.
 
-## Current milestone: Phase 2 — Ticker memory
+## Current milestone: Desktop dashboard
 
-TrendVisionAI currently:
+The app currently:
 
-1. Reads Discord/TrendVision toasts through the Windows `UserNotificationListener` API.
-2. Saves the exact WinRT payload locally for debugging and replay.
-3. Detects the TrendVision channel.
-4. Converts each notification into one or more channel-specific scanner events.
-5. Stores those events in SQLite.
-6. Accumulates events for the same ticker into durable ticker memory.
-7. Tracks recent multi-channel convergence without making a trade decision yet.
+1. Reads TrendVision Discord toasts through the Windows `UserNotificationListener` API.
+2. Stores raw WinRT payloads for debugging/replay.
+3. Parses channel-specific scanner events.
+4. Stores everything in SQLite.
+5. Builds durable ticker memory across multiple scanner channels.
+6. Ranks recent scanner convergence into an **attention list** for review.
+7. Presents the workflow through a PySide6 desktop UI.
 
-There is **no OpenAI API call, market-data API, brokerage integration, or automatic trading** in this version.
+There is **no brokerage integration, automatic order execution, OpenAI evaluation, or external market-data enrichment** in this version.
 
-## Why two storage layers?
+## Setup
 
-`raw_notifications` / `winrt_candidates.jsonl` preserve what Windows actually exposed.
-
-`scanner_events` stores the semantic event derived from that payload. Different TrendVision channels have different schemas, and `all-in-one-scanner` can produce multiple ticker events from one Discord notification.
-
-`ticker_states` accumulates what the project has learned about each ticker across scanner events.
-
-## Windows setup
-
-### 1. Download/clone the project
-
-Keep the project somewhere simple, for example:
-
-```text
-C:\Projects\TrendVisionAI
-```
-
-### 2. Install Python 3
-
-Python 3.11 or 3.12 is recommended.
-
-### 3. Run setup
-
-Double-click:
+Run once after cloning, and again whenever dependencies change:
 
 ```text
 scripts\setup.bat
 ```
 
-### 4. Start the Windows notification listener
+## Start TrendVisionAI
 
-Run:
-
-```text
-scripts\run_notification_api_listener.bat
-```
-
-Leave it open before the next TrendVision toast appears.
-
-The listener saves candidates to:
+Stop any old terminal listener first, then launch:
 
 ```text
-data\winrt_candidates.jsonl
+scripts\run_ui.bat
 ```
 
-and structured data to:
+The desktop app automatically starts and stops its own Windows notification listener.
+
+## UI screens
+
+### Dashboard
+
+Shows the recent **Attention List** with:
+
+- ticker
+- attention tier
+- score
+- recent event count
+- number of independent scanner channels
+- contributing scanner types
+- explanation / risk flags
+
+The ranking is a review-priority tool, **not a buy/sell signal**.
+
+### Live Alerts
+
+A live table of structured TrendVision scanner events. Filter by ticker, text, or scanner channel. Double-click a ticker to open its memory.
+
+### Ticker Memory
+
+Shows everything accumulated for one ticker:
+
+- first/last appearance
+- total events
+- independent channels
+- latest known facts supplied by TrendVision
+- full activity timeline
+
+Missing Discord-toast fields stay missing rather than being invented.
+
+### Listener & System
+
+Shows whether the Windows notification listener is running, lets you start/stop it, and displays its diagnostic log.
+
+## Storage
 
 ```text
 data\trendvision.db
 data\raw_notifications.jsonl
+data\winrt_candidates.jsonl
 ```
 
-## Inspect captured notification formats
+Main SQLite layers:
 
-Run:
+- `raw_notifications` — normalized notifications captured from Windows
+- `scanner_events` — channel-specific structured events
+- `ticker_states` — durable accumulated state for each ticker
 
-```text
-scripts\inspect_candidates.bat
-```
+`all-in-one-scanner` can create multiple ticker events from a single Discord notification.
 
-This groups representative WinRT payloads by TrendVision channel.
-
-## Inspect ticker memory
-
-List recently seen tickers:
-
-```text
-scripts\show_ticker_memory.bat
-```
-
-Inspect one ticker in detail:
-
-```text
-scripts\show_ticker_memory.bat LRHC
-```
-
-The ticker view shows:
-
-- all stored event count
-- all channels that have mentioned the ticker
-- latest known non-empty facts from scanner payloads
-- recent events inside a 30-minute convergence window
-
-The convergence window is deliberately descriptive, not a trade score. For example, the system can now answer: "LRHC appeared in all-in-one, volume and squeeze scanners during the last 30 minutes."
-
-## Channel handling
-
-Channel-specific structures currently exist for:
+## Supported TrendVision channels
 
 - `all-in-one-scanner`
 - `social-news`
@@ -116,24 +98,25 @@ Channel-specific structures currently exist for:
 - `halt-scanner`
 - `ipo-scanner`
 
-Fields that Discord does not include in the Windows toast remain missing rather than being invented.
+## Legacy development commands
+
+The old scripts such as `show_ticker_memory.bat`, `show_attention_list.bat`, and `inspect_candidates.bat` remain useful for debugging, but normal use should now happen through `run_ui.bat`.
 
 ## Roadmap
 
-- [x] Project scaffold
 - [x] Windows notification API capture
-- [x] Raw SQLite + JSONL storage
-- [x] TrendVision channel detection
-- [x] Channel-specific scanner events
-- [x] Multi-item `all-in-one-scanner` handling
-- [x] Duplicate protection
-- [x] Per-ticker accumulated state
-- [x] Recent multi-channel convergence view
-- [ ] Tune significance/convergence rules using real collected alerts
-- [ ] Decide which setups deserve deeper evaluation
-- [ ] Add OpenAI evaluation only after the local filtering logic is useful
-- [ ] Add final trade-candidate notification layer
+- [x] Channel-specific scanner parsing
+- [x] SQLite / JSONL persistence
+- [x] Multi-item all-in-one handling
+- [x] Ticker memory
+- [x] Recent convergence logic
+- [x] Explainable attention ranking
+- [x] Desktop dashboard
+- [ ] Tune attention rules from real outcomes
+- [ ] Decide when a setup deserves deeper analysis
+- [ ] Add AI evaluation only after local filtering is reliable
+- [ ] Add user-facing trade-candidate alerts
 
 ## Safety
 
-This project organizes and analyzes market information. It does not guarantee profitable trades, and it does not execute brokerage orders.
+TrendVisionAI organizes and prioritizes market information. It does not guarantee profitable trades and does not place brokerage orders.
