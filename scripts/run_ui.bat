@@ -1,0 +1,21 @@
+@echo off
+setlocal
+cd /d "%~dp0\.."
+
+if not exist .venv\Scripts\python.exe (
+    echo ERROR: Setup has not been run yet.
+    echo Run scripts\setup.bat first.
+    pause
+    exit /b 1
+)
+
+.venv\Scripts\python.exe -c "import PySide6" >nul 2>&1
+if errorlevel 1 (
+    echo ERROR: PySide6 is not installed yet.
+    echo Run scripts\setup.bat after git pull.
+    pause
+    exit /b 1
+)
+
+set PYTHONPATH=%CD%\src
+.venv\Scripts\python.exe -m trendvision_ai.desktop_ui
