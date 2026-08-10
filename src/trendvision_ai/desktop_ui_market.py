@@ -18,6 +18,10 @@ from PySide6.QtWidgets import (
 )
 
 from . import desktop_ui_calibration as cal
+from .automatic_outcomes import (
+    SCOPE_MARKET_SESSION,
+    AutomaticOutcomeStore,
+)
 from .market_data import (
     DEFAULT_FEED,
     AlpacaMarketClient,
@@ -63,6 +67,7 @@ class MarketTrackerController(QObject):
         super().__init__()
         self.repo = repo
         self.store = MarketDataStore(database_path)
+        self.outcomes = AutomaticOutcomeStore(database_path)
         self.settings = QSettings("TrendVisionAI", "TrendVisionAI")
         self.timer = QTimer(self)
         self.timer.setInterval(15_000)
@@ -81,9 +86,20 @@ class MarketTrackerController(QObject):
             self.worker.requestInterruption()
             self.worker.wait(1500)
 
+    def _refresh_automatic_outcomes(self) -> dict[str, int]:
+        try:
+            return self.outcomes.refresh_all_due_outcomes(limit=200)
+        except Exception:
+            return {"session_changes": 0, "review_changes": 0}
+
     def poll(self) -> None:
         if self.worker is not None and self.worker.isRunning():
             return
+
+        # Outcome classification is local and can run even if credentials are
+        # temporarily unavailable. This also catches horizons that completed
+        # since the previous poll.
+        self._refresh_automatic_outcomes()
 
         self._feed = str(
             self.settings.value("alpaca/feed", DEFAULT_FEED) or DEFAULT_FEED
@@ -93,6 +109,7 @@ class MarketTrackerController(QObject):
             self.status_changed.emit(
                 "Alpaca market tracking is ready but not configured. Add API credentials under Listener & System."
             )
+            self.data_updated.emit()
             return
 
         # Discovery remains TrendVision-only. The market API begins observing a
@@ -117,7 +134,7 @@ class MarketTrackerController(QObject):
         self._active_sessions = sessions
         if not sessions:
             self.status_changed.emit(
-                "Alpaca connected. Waiting for a ticker to reach HIGH ATTENTION."
+                "Alpaca connected. Waiting for a ticker to reach HIGH ATTENTION. Automatic outcome calibration is active."
             )
             self.data_updated.emit()
             return
@@ -160,14 +177,26 @@ class MarketTrackerController(QObject):
                 missing_ids,
                 "No snapshot returned for this symbol/feed on the latest poll.",
             )
+
+        changes = self._refresh_automatic_outcomes()
+        auto_changes = int(changes.get("session_changes") or 0) + int(
+            changes.get("review_changes") or 0
+        )
+        suffix = (
+            f" Automatic outcome engine updated {auto_changes} completed horizon(s)."
+            if auto_changes
+            else ""
+        )
         self.status_changed.emit(
-            f"Alpaca {self._feed.upper()}: saved {saved} market snapshot(s) for {len(session_by_ticker)} active tracking session(s)."
+            f"Alpaca {self._feed.upper()}: saved {saved} market snapshot(s) for "
+            f"{len(session_by_ticker)} active tracking session(s).{suffix}"
         )
         self.data_updated.emit()
 
     def _poll_failed(self, message: str) -> None:
         ids = [int(row["id"]) for row in self._active_sessions]
         self.store.set_error(ids, message)
+        self._refresh_automatic_outcomes()
         self.status_changed.emit(f"Alpaca market-data error: {message}")
         self.data_updated.emit()
 
@@ -183,6 +212,7 @@ class MarketTrackingPage(QWidget):
     def __init__(self, database_path) -> None:
         super().__init__()
         self.store = MarketDataStore(database_path)
+        self.outcomes = AutomaticOutcomeStore(database_path)
         self._metrics_rows: list[dict[str, Any]] = []
 
         root = QVBoxLayout(self)
@@ -192,7 +222,7 @@ class MarketTrackingPage(QWidget):
         title = QLabel("Market Tracking")
         title.setObjectName("pageTitle")
         subtitle = QLabel(
-            "HIGH ATTENTION tickers are automatically observed for up to 4 hours. TrendVision discovers them; Alpaca measures the price path and objective outcome."
+            "HIGH ATTENTION tickers are automatically observed for up to 4 hours. TrendVision discovers them; Alpaca measures the price path; TrendVisionAI classifies completed horizons automatically."
         )
         subtitle.setObjectName("muted")
         subtitle.setWordWrap(True)
@@ -208,17 +238,25 @@ class MarketTrackingPage(QWidget):
         self.active_card = cal.ai.base.MetricCard("Active sessions")
         self.total_card = cal.ai.base.MetricCard("Tracking sessions")
         self.samples_card = cal.ai.base.MetricCard("Samples stored")
+        self.auto_card = cal.ai.base.MetricCard("Auto 15m outcomes")
         self.best_card = cal.ai.base.MetricCard("Best MFE")
-        for card in (self.active_card, self.total_card, self.samples_card, self.best_card):
+        for card in (
+            self.active_card,
+            self.total_card,
+            self.samples_card,
+            self.auto_card,
+            self.best_card,
+        ):
             metrics.addWidget(card)
         root.addLayout(metrics)
 
-        self.table = QTableWidget(0, 15)
+        self.table = QTableWidget(0, 16)
         self.table.setHorizontalHeaderLabels(
             [
                 "Started",
                 "Ticker",
                 "Trigger",
+                "Auto 15m",
                 "Reference",
                 "Last",
                 "Return",
@@ -238,9 +276,9 @@ class MarketTrackingPage(QWidget):
         self.table.setEditTriggers(QTableWidget.NoEditTriggers)
         self.table.verticalHeader().setVisible(False)
         header = self.table.horizontalHeader()
-        for column in range(14):
+        for column in range(15):
             header.setSectionResizeMode(column, QHeaderView.ResizeToContents)
-        header.setSectionResizeMode(14, QHeaderView.Stretch)
+        header.setSectionResizeMode(15, QHeaderView.Stretch)
         self.table.cellDoubleClicked.connect(self._open_ticker)
         self.table.itemSelectionChanged.connect(self._show_selected_details)
         root.addWidget(self.table, 1)
@@ -252,7 +290,7 @@ class MarketTrackingPage(QWidget):
         detail_title = QLabel("Selected tracking session")
         detail_title.setStyleSheet("font-size: 11pt; font-weight: 600;")
         self.detail = QLabel(
-            "Select a row to see peak/trough timing and 15m / 30m / 60m / 4h returns."
+            "Select a row to see automatic 15m / 30m / 60m / 4h outcomes and peak/trough measurements."
         )
         self.detail.setObjectName("muted")
         self.detail.setWordWrap(True)
@@ -261,7 +299,7 @@ class MarketTrackingPage(QWidget):
         root.addWidget(detail_card)
 
         note = QLabel(
-            "Reference price is the first successful Alpaca snapshot after HIGH ATTENTION is detected. Review-specific calibration uses the first sample after the AI review timestamp as its own reference. MFE/MAE are descriptive measurements, not profit guarantees. IEX measurements reflect the IEX feed rather than consolidated SIP data."
+            "Automatic labels describe the observed price path; they are not buy/sell instructions. Reference price is the first successful Alpaca snapshot after HIGH ATTENTION. IEX reflects the IEX feed rather than consolidated SIP data."
         )
         note.setObjectName("muted")
         note.setWordWrap(True)
@@ -308,23 +346,46 @@ class MarketTrackingPage(QWidget):
         except (TypeError, ValueError):
             return "-"
 
+    @staticmethod
+    def _auto_short(outcome: dict[str, Any] | None) -> str:
+        if not outcome:
+            return "WAITING"
+        return f"{outcome.get('label') or '-'} [{outcome.get('confidence') or '-'}]"
+
     def _show_selected_details(self) -> None:
         row_index = self.table.currentRow()
         if row_index < 0 or row_index >= len(self._metrics_rows):
             return
         row = self._metrics_rows[row_index]
-        horizon = row.get("horizon_returns") or {}
+        session_id = int(row.get("id") or 0)
         peak_time = self._minutes(row.get("time_to_peak_minutes"))
         trough_time = self._minutes(row.get("time_to_trough_minutes"))
+
+        outcome_lines: list[str] = []
+        for horizon, label in ((15, "15m"), (30, "30m"), (60, "60m"), (240, "4h")):
+            auto = self.outcomes.get_outcome(
+                scope=SCOPE_MARKET_SESSION,
+                subject_id=session_id,
+                horizon_minutes=horizon,
+            )
+            if auto is None:
+                outcome_lines.append(f"{label}: waiting")
+                continue
+            metrics = auto.get("metrics") or {}
+            flags = ", ".join(auto.get("flags") or []) or "none"
+            outcome_lines.append(
+                f"{label}: {auto.get('label')} [{auto.get('confidence')}] | "
+                f"R {self._pct(metrics.get('return_pct'))} | MFE {self._pct(metrics.get('mfe_pct'))} | "
+                f"MAE {self._pct(metrics.get('mae_pct'))} | flags {flags}"
+            )
+
         self.detail.setText(
             f"{row.get('ticker') or '-'} | Reference {self._price(row.get('reference_price'))} → "
             f"Last {self._price(row.get('last_price'))} ({self._pct(row.get('return_pct'))}) | "
             f"Peak {self._price(row.get('peak_price'))} at +{peak_time} | "
             f"Trough {self._price(row.get('trough_price'))} at +{trough_time} | "
             f"Max 1m volume {self._volume(row.get('max_minute_volume'))}\n"
-            f"Return from tracking reference: 15m {self._pct(horizon.get(15))} | "
-            f"30m {self._pct(horizon.get(30))} | 60m {self._pct(horizon.get(60))} | "
-            f"4h {self._pct(horizon.get(240))}. A dash means that horizon is not complete or lacks fresh samples."
+            + "\n".join(outcome_lines)
         )
 
     def refresh(self) -> None:
@@ -334,6 +395,11 @@ class MarketTrackingPage(QWidget):
             item = self.table.item(current, 1)
             selected_ticker = item.text() if item else None
 
+        try:
+            self.outcomes.refresh_due_session_outcomes(limit=200)
+        except Exception:
+            pass
+
         sessions = self.store.list_sessions(limit=100)
         metrics = [self.store.session_metrics(int(row["id"])) for row in sessions]
         self._metrics_rows = metrics
@@ -342,16 +408,32 @@ class MarketTrackingPage(QWidget):
         mfe_values = [
             float(row["mfe_pct"]) for row in metrics if row.get("mfe_pct") is not None
         ]
+        auto_15_count = sum(
+            1
+            for row in metrics
+            if self.outcomes.get_outcome(
+                scope=SCOPE_MARKET_SESSION,
+                subject_id=int(row.get("id") or 0),
+                horizon_minutes=15,
+            )
+            is not None
+        )
 
         self.active_card.set_value(len(active))
         self.total_card.set_value(len(metrics))
         self.samples_card.set_value(sample_total)
+        self.auto_card.set_value(auto_15_count)
         self.best_card.set_value(f"{max(mfe_values):+.1f}%" if mfe_values else "-")
 
         self.table.setRowCount(len(metrics))
         restore_row = -1
         for row_index, row in enumerate(metrics):
             latest = row.get("last_sample") or {}
+            auto_15 = self.outcomes.get_outcome(
+                scope=SCOPE_MARKET_SESSION,
+                subject_id=int(row.get("id") or 0),
+                horizon_minutes=15,
+            )
             feed_status = (
                 f"{str(row.get('feed') or '-').upper()} / {row.get('status') or '-'}"
             )
@@ -361,6 +443,7 @@ class MarketTrackingPage(QWidget):
                 cal.ai.base._display_time(str(row.get("started_at") or "")),
                 row.get("ticker") or "-",
                 f"{row.get('trigger_tier') or '-'} ({row.get('trigger_score')})",
+                self._auto_short(auto_15),
                 self._price(row.get("reference_price")),
                 self._price(row.get("last_price")),
                 self._pct(row.get("return_pct")),
@@ -376,7 +459,7 @@ class MarketTrackingPage(QWidget):
             ]
             for column, value in enumerate(values):
                 cell = QTableWidgetItem(str(value))
-                if column in {5, 6, 7, 8, 9, 12, 13}:
+                if column in {3, 6, 7, 8, 9, 10, 13, 14}:
                     cell.setTextAlignment(Qt.AlignCenter)
                 self.table.setItem(row_index, column, cell)
             if selected_ticker and row.get("ticker") == selected_ticker and restore_row < 0:
@@ -403,7 +486,7 @@ class MarketSystemPage(cal.ai.base.SystemPage):
         title = QLabel("Alpaca Market Tracking")
         title.setStyleSheet("font-size: 12pt; font-weight: 600;")
         description = QLabel(
-            "Used only to measure HIGH ATTENTION tickers after TrendVision discovers them. Credentials are stored in Windows Credential Manager, not config.json or GitHub."
+            "Used only to measure HIGH ATTENTION tickers after TrendVision discovers them. Completed 15m/30m/60m/4h outcomes are classified automatically. Credentials are stored in Windows Credential Manager, not config.json or GitHub."
         )
         description.setObjectName("muted")
         description.setWordWrap(True)
@@ -469,7 +552,7 @@ class MarketSystemPage(cal.ai.base.SystemPage):
         ).upper()
         if get_alpaca_credentials():
             self.alpaca_status.setText(
-                f"Alpaca credentials configured. Selected feed: {feed}."
+                f"Alpaca credentials configured. Selected feed: {feed}. Automatic outcome calibration is enabled."
             )
         else:
             self.alpaca_status.setText(
@@ -528,6 +611,7 @@ class MarketMainWindow(cal.CalibrationMainWindow):
         self.market_controller.status_changed.connect(self.market_page.set_status)
         self.market_controller.status_changed.connect(self.system_page.set_market_status)
         self.market_controller.data_updated.connect(self.market_page.refresh)
+        self.market_controller.data_updated.connect(self.calibration_page.refresh)
         self.market_controller.start()
 
     def closeEvent(self, event) -> None:
