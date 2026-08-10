@@ -70,6 +70,22 @@ def test_parse_scanner_ticker():
     assert parsed.ticker == "XHLD"
 
 
+def test_normalizes_markdown_from_real_all_in_one_toast():
+    parsed = parse_uia_texts(
+        [
+            "Discord",
+            "TrendVision (#all-in-one-scanner, Trend Vision Scanner)",
+            "**NWC** :flag_us: · #1 · ↑6% · $1.52 · **FT** 25M · **MC** 36M · **RV** 0.90x · **1V** 2K",
+            "> NEWS • NanoViricides Has Received Regulatory Approval for a Phase II Clinical Trial",
+        ]
+    )
+
+    assert parsed is not None
+    assert parsed.channel == "all-in-one-scanner"
+    assert parsed.ticker is None  # one all-in-one toast may contain several symbols
+    assert parsed.body.startswith("NWC :flag_us: · #1 · ↑6% · $1.52 · FT 25M · MC 36M · RV 0.90x · 1V 2K")
+
+
 def test_requires_trendvision():
     assert parse_uia_texts(["Discord", "Friend", "hello"]) is None
 
