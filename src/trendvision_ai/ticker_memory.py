@@ -34,11 +34,18 @@ def _parse_time(value: str) -> datetime | None:
         return None
 
 
+def _sort_key(event: TickerEventRecord) -> tuple[int, float | str]:
+    parsed = _parse_time(event.received_at)
+    if parsed is not None:
+        try:
+            return (0, parsed.timestamp())
+        except (OverflowError, OSError, ValueError):
+            pass
+    return (1, event.received_at)
+
+
 def _sorted_events(events: Iterable[TickerEventRecord]) -> list[TickerEventRecord]:
-    return sorted(
-        list(events),
-        key=lambda event: _parse_time(event.received_at) or datetime.min,
-    )
+    return sorted(list(events), key=_sort_key)
 
 
 def build_ticker_state(ticker: str, events: Iterable[TickerEventRecord]) -> TickerState | None:
@@ -98,18 +105,31 @@ def recent_events(
     if not ordered:
         return []
 
+    parsed_times = [
+        value for value in (_parse_time(event.received_at) for event in ordered)
+        if value is not None
+    ]
+
     if reference_time is None:
-        parsed = [_parse_time(event.received_at) for event in ordered]
-        reference_time = max((value for value in parsed if value is not None), default=None)
-    if reference_time is None:
-        return ordered
+        if not parsed_times:
+            return ordered
+        latest = max(parsed_times, key=lambda value: value.timestamp())
+        reference_time = datetime.now(latest.tzinfo) if latest.tzinfo is not None else datetime.now()
 
     cutoff = reference_time - timedelta(minutes=max(1, window_minutes))
     result: list[TickerEventRecord] = []
     for event in ordered:
         event_time = _parse_time(event.received_at)
-        if event_time is None or event_time >= cutoff:
-            result.append(event)
+        if event_time is None:
+            continue
+        try:
+            if event_time >= cutoff:
+                result.append(event)
+        except TypeError:
+            # If legacy data mixed timezone-aware and naive timestamps, compare
+            # them after dropping timezone information rather than crashing.
+            if event_time.replace(tzinfo=None) >= cutoff.replace(tzinfo=None):
+                result.append(event)
     return result
 
 
