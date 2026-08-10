@@ -16,10 +16,29 @@ ALPACA_SECRET_ACCOUNT = "alpaca_api_secret_key"
 ALPACA_DATA_URL = "https://data.alpaca.markets"
 DEFAULT_FEED = "iex"
 DEFAULT_TRACKING_MINUTES = 240
+TRACKING_HORIZONS = (15, 30, 60, 240)
+
+
+def _now() -> datetime:
+    return datetime.now(timezone.utc).astimezone()
 
 
 def _now_iso() -> str:
-    return datetime.now(timezone.utc).astimezone().isoformat(timespec="seconds")
+    return _now().isoformat(timespec="seconds")
+
+
+def _parse_time(value: Any) -> datetime | None:
+    try:
+        return datetime.fromisoformat(str(value))
+    except (TypeError, ValueError):
+        return None
+
+
+def _seconds_between(later: datetime, earlier: datetime) -> float:
+    try:
+        return (later - earlier).total_seconds()
+    except TypeError:
+        return (later.replace(tzinfo=None) - earlier.replace(tzinfo=None)).total_seconds()
 
 
 def get_alpaca_credentials() -> tuple[str, str] | None:
@@ -72,7 +91,9 @@ class AlpacaMarketClient:
         self.feed = (feed or DEFAULT_FEED).strip().lower()
 
     def fetch_snapshots(self, symbols: list[str]) -> dict[str, dict[str, Any]]:
-        normalized = list(dict.fromkeys(symbol.upper().strip() for symbol in symbols if symbol.strip()))
+        normalized = list(
+            dict.fromkeys(symbol.upper().strip() for symbol in symbols if symbol.strip())
+        )
         if not normalized:
             return {}
 
@@ -124,6 +145,16 @@ def _num(value: Any) -> float | None:
         return None
 
 
+def _sample_price(row: dict[str, Any] | sqlite3.Row) -> float | None:
+    return _num(row["trade_price"]) or _num(row["minute_close"])
+
+
+def _pct_change(value: float | None, reference: float | None) -> float | None:
+    if value is None or reference is None or reference <= 0:
+        return None
+    return ((value / reference) - 1.0) * 100.0
+
+
 def parse_snapshot(symbol: str, payload: dict[str, Any], *, feed: str) -> dict[str, Any]:
     trade = payload.get("latestTrade") or payload.get("latest_trade") or {}
     quote = payload.get("latestQuote") or payload.get("latest_quote") or {}
@@ -133,7 +164,11 @@ def parse_snapshot(symbol: str, payload: dict[str, Any], *, feed: str) -> dict[s
     bid = _num(quote.get("bp"))
     ask = _num(quote.get("ap"))
     spread = (ask - bid) if ask is not None and bid is not None and ask >= bid else None
-    midpoint = ((ask + bid) / 2.0) if ask is not None and bid is not None and ask > 0 and bid > 0 else None
+    midpoint = (
+        ((ask + bid) / 2.0)
+        if ask is not None and bid is not None and ask > 0 and bid > 0
+        else None
+    )
     spread_pct = (spread / midpoint * 100.0) if spread is not None and midpoint else None
 
     return {
@@ -160,6 +195,174 @@ def parse_snapshot(symbol: str, payload: dict[str, Any], *, feed: str) -> dict[s
         "day_volume": _num(daily.get("v")),
         "raw_json": json.dumps(payload, ensure_ascii=False, sort_keys=True),
     }
+
+
+def _window_metrics(
+    rows: list[dict[str, Any]],
+    *,
+    reference_time: datetime,
+    target_minutes: int,
+) -> dict[str, Any]:
+    """Measure a price path after a reference time using stored Alpaca samples.
+
+    The reference price is the first sample at/after reference_time. The first
+    minute bar's high/low is intentionally ignored because that bar can contain
+    trades from before the reference instant. Later minute bars can contribute
+    their high/low to MFE/MAE.
+    """
+    target_minutes = max(1, int(target_minutes))
+    deadline = reference_time + timedelta(minutes=target_minutes)
+    now = _now()
+
+    eligible: list[tuple[datetime, dict[str, Any]]] = []
+    for row in rows:
+        captured = _parse_time(row.get("captured_at"))
+        if captured is None:
+            continue
+        delta = _seconds_between(captured, reference_time)
+        if delta < 0 or delta > target_minutes * 60:
+            continue
+        eligible.append((captured, row))
+    eligible.sort(key=lambda item: item[0])
+
+    base = {
+        "available": False,
+        "target_minutes": target_minutes,
+        "horizon_complete": _seconds_between(now, deadline) >= 0,
+        "sample_count": 0,
+        "coverage_minutes": 0.0,
+        "coverage_pct": 0.0,
+        "reference_price": None,
+        "reference_captured_at": None,
+        "last_price": None,
+        "last_captured_at": None,
+        "return_pct": None,
+        "mfe_pct": None,
+        "mae_pct": None,
+        "peak_price": None,
+        "peak_captured_at": None,
+        "trough_price": None,
+        "trough_captured_at": None,
+        "time_to_peak_minutes": None,
+        "time_to_trough_minutes": None,
+        "max_minute_volume": None,
+        "latest_spread_pct": None,
+        "feeds": [],
+    }
+    if not eligible:
+        return base
+
+    reference_captured, first = eligible[0]
+    reference_price = _sample_price(first)
+    if reference_price is None or reference_price <= 0:
+        return base
+
+    reference_minute = first.get("minute_timestamp")
+    peak_price = reference_price
+    trough_price = reference_price
+    peak_time = reference_captured
+    trough_time = reference_captured
+    minute_volumes: dict[str, float] = {}
+    feeds: list[str] = []
+
+    for captured, row in eligible:
+        price = _sample_price(row)
+        if price is None or price <= 0:
+            continue
+
+        same_reference_minute = bool(
+            reference_minute
+            and row.get("minute_timestamp")
+            and row.get("minute_timestamp") == reference_minute
+        )
+        if captured == reference_captured or same_reference_minute:
+            high = price
+            low = price
+        else:
+            high = _num(row.get("minute_high")) or price
+            low = _num(row.get("minute_low")) or price
+
+        if high > peak_price:
+            peak_price = high
+            peak_time = captured
+        if low < trough_price:
+            trough_price = low
+            trough_time = captured
+
+        volume = _num(row.get("minute_volume"))
+        if volume is not None:
+            minute_key = str(row.get("minute_timestamp") or row.get("captured_at"))
+            minute_volumes[minute_key] = max(volume, minute_volumes.get(minute_key, 0.0))
+
+        feed = str(row.get("feed") or "").upper()
+        if feed and feed not in feeds:
+            feeds.append(feed)
+
+    last_captured, last = eligible[-1]
+    last_price = _sample_price(last)
+    coverage_minutes = max(0.0, _seconds_between(last_captured, reference_time) / 60.0)
+
+    base.update(
+        {
+            "available": True,
+            "sample_count": len(eligible),
+            "coverage_minutes": coverage_minutes,
+            "coverage_pct": min(100.0, coverage_minutes / target_minutes * 100.0),
+            "reference_price": reference_price,
+            "reference_captured_at": reference_captured.isoformat(timespec="seconds"),
+            "last_price": last_price,
+            "last_captured_at": last_captured.isoformat(timespec="seconds"),
+            "return_pct": _pct_change(last_price, reference_price),
+            "mfe_pct": _pct_change(peak_price, reference_price),
+            "mae_pct": _pct_change(trough_price, reference_price),
+            "peak_price": peak_price,
+            "peak_captured_at": peak_time.isoformat(timespec="seconds"),
+            "trough_price": trough_price,
+            "trough_captured_at": trough_time.isoformat(timespec="seconds"),
+            "time_to_peak_minutes": max(
+                0.0, _seconds_between(peak_time, reference_time) / 60.0
+            ),
+            "time_to_trough_minutes": max(
+                0.0, _seconds_between(trough_time, reference_time) / 60.0
+            ),
+            "max_minute_volume": max(minute_volumes.values()) if minute_volumes else None,
+            "latest_spread_pct": _num(last.get("spread_pct")),
+            "feeds": feeds,
+        }
+    )
+    return base
+
+
+def _return_at_horizon(
+    rows: list[dict[str, Any]],
+    *,
+    reference_time: datetime,
+    reference_price: float,
+    minutes: int,
+) -> float | None:
+    deadline = reference_time + timedelta(minutes=minutes)
+    if _seconds_between(_now(), deadline) < 0:
+        return None
+
+    candidates: list[tuple[datetime, dict[str, Any]]] = []
+    for row in rows:
+        captured = _parse_time(row.get("captured_at"))
+        if captured is None:
+            continue
+        delta = _seconds_between(captured, reference_time)
+        if 0 <= delta <= minutes * 60:
+            candidates.append((captured, row))
+    if not candidates:
+        return None
+    candidates.sort(key=lambda item: item[0])
+    captured, row = candidates[-1]
+
+    # The tracker polls every 15 seconds. Requiring a sample within the final
+    # minute prevents a stale 2-minute observation from masquerading as a 30m
+    # outcome if tracking stopped or failed.
+    if _seconds_between(deadline, captured) > 60:
+        return None
+    return _pct_change(_sample_price(row), reference_price)
 
 
 class MarketDataStore:
@@ -225,6 +428,8 @@ class MarketDataStore:
                 );
                 CREATE INDEX IF NOT EXISTS idx_market_samples_session_time
                     ON market_samples(session_id, captured_at);
+                CREATE INDEX IF NOT EXISTS idx_market_samples_ticker_time
+                    ON market_samples(ticker, captured_at);
                 """
             )
 
@@ -264,7 +469,7 @@ class MarketDataStore:
             if row is not None:
                 return dict(row)
 
-            started = datetime.now(timezone.utc).astimezone()
+            started = _now()
             expires = started + timedelta(minutes=max(15, int(tracking_minutes)))
             cursor = connection.execute(
                 """
@@ -314,13 +519,29 @@ class MarketDataStore:
                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
-                    int(session_id), sample["ticker"], sample["captured_at"], sample["feed"],
-                    sample.get("trade_price"), sample.get("trade_size"), sample.get("trade_timestamp"),
-                    sample.get("bid"), sample.get("ask"), sample.get("bid_size"), sample.get("ask_size"),
-                    sample.get("quote_timestamp"), sample.get("spread"), sample.get("spread_pct"),
-                    sample.get("minute_timestamp"), sample.get("minute_open"), sample.get("minute_high"),
-                    sample.get("minute_low"), sample.get("minute_close"), sample.get("minute_volume"),
-                    sample.get("minute_vwap"), sample.get("day_volume"), sample.get("raw_json") or "{}",
+                    int(session_id),
+                    sample["ticker"],
+                    sample["captured_at"],
+                    sample["feed"],
+                    sample.get("trade_price"),
+                    sample.get("trade_size"),
+                    sample.get("trade_timestamp"),
+                    sample.get("bid"),
+                    sample.get("ask"),
+                    sample.get("bid_size"),
+                    sample.get("ask_size"),
+                    sample.get("quote_timestamp"),
+                    sample.get("spread"),
+                    sample.get("spread_pct"),
+                    sample.get("minute_timestamp"),
+                    sample.get("minute_open"),
+                    sample.get("minute_high"),
+                    sample.get("minute_low"),
+                    sample.get("minute_close"),
+                    sample.get("minute_volume"),
+                    sample.get("minute_vwap"),
+                    sample.get("day_volume"),
+                    sample.get("raw_json") or "{}",
                 ),
             )
             row = connection.execute(
@@ -372,43 +593,113 @@ class MarketDataStore:
             ).fetchall()
         return [dict(row) for row in rows]
 
+    def _session_rows(self, session_id: int) -> list[dict[str, Any]]:
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT * FROM market_samples
+                WHERE session_id=?
+                ORDER BY captured_at ASC, id ASC
+                """,
+                (int(session_id),),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
     def session_metrics(self, session_id: int) -> dict[str, Any]:
         with self._connect() as connection:
             session = connection.execute(
                 "SELECT * FROM market_tracking_sessions WHERE id=?",
                 (int(session_id),),
             ).fetchone()
-            latest = connection.execute(
-                """
-                SELECT * FROM market_samples
-                WHERE session_id=? ORDER BY captured_at DESC, id DESC LIMIT 1
-                """,
-                (int(session_id),),
-            ).fetchone()
-            aggregate = connection.execute(
-                """
-                SELECT COUNT(*) AS sample_count,
-                       MAX(COALESCE(minute_high, trade_price, minute_close)) AS max_price,
-                       MIN(COALESCE(minute_low, trade_price, minute_close)) AS min_price
-                FROM market_samples WHERE session_id=?
-                """,
-                (int(session_id),),
-            ).fetchone()
         if session is None:
             return {}
+
         result = dict(session)
-        result["sample_count"] = int(aggregate["sample_count"] or 0) if aggregate else 0
-        result["last_sample"] = dict(latest) if latest is not None else None
+        rows = self._session_rows(session_id)
+        reference_time = _parse_time(result.get("reference_captured_at"))
+        reference_price = _num(result.get("reference_price"))
+        if reference_time is None and rows:
+            reference_time = _parse_time(rows[0].get("captured_at"))
+        if reference_price is None and rows:
+            reference_price = _sample_price(rows[0])
 
-        reference = _num(session["reference_price"])
-        last_price = None
-        if latest is not None:
-            last_price = _num(latest["trade_price"]) or _num(latest["minute_close"])
-        result["last_price"] = last_price
-        result["return_pct"] = ((last_price / reference) - 1.0) * 100.0 if reference and last_price else None
+        result["sample_count"] = len(rows)
+        result["last_sample"] = rows[-1] if rows else None
+        result["last_price"] = _sample_price(rows[-1]) if rows else None
+        result["return_pct"] = _pct_change(result["last_price"], reference_price)
+        result["mfe_pct"] = None
+        result["mae_pct"] = None
+        result["peak_price"] = None
+        result["trough_price"] = None
+        result["time_to_peak_minutes"] = None
+        result["time_to_trough_minutes"] = None
+        result["max_minute_volume"] = None
+        result["elapsed_minutes"] = 0.0
+        result["horizon_returns"] = {minutes: None for minutes in TRACKING_HORIZONS}
 
-        max_price = _num(aggregate["max_price"]) if aggregate else None
-        min_price = _num(aggregate["min_price"]) if aggregate else None
-        result["mfe_pct"] = ((max_price / reference) - 1.0) * 100.0 if reference and max_price else None
-        result["mae_pct"] = ((min_price / reference) - 1.0) * 100.0 if reference and min_price else None
+        if reference_time is not None and rows:
+            metrics = _window_metrics(
+                rows,
+                reference_time=reference_time,
+                target_minutes=DEFAULT_TRACKING_MINUTES,
+            )
+            for key in (
+                "mfe_pct",
+                "mae_pct",
+                "peak_price",
+                "trough_price",
+                "time_to_peak_minutes",
+                "time_to_trough_minutes",
+                "max_minute_volume",
+                "coverage_minutes",
+            ):
+                if key in metrics:
+                    result[key] = metrics[key]
+            result["elapsed_minutes"] = float(metrics.get("coverage_minutes") or 0.0)
+            if reference_price is not None and reference_price > 0:
+                result["horizon_returns"] = {
+                    minutes: _return_at_horizon(
+                        rows,
+                        reference_time=reference_time,
+                        reference_price=reference_price,
+                        minutes=minutes,
+                    )
+                    for minutes in TRACKING_HORIZONS
+                }
+        return result
+
+    def review_metrics(
+        self,
+        *,
+        ticker: str,
+        review_created_at: str,
+        horizon_minutes: int = 30,
+    ) -> dict[str, Any]:
+        """Return objective Alpaca measurements tied to one AI review timestamp."""
+        review_time = _parse_time(review_created_at)
+        if review_time is None:
+            return {
+                "available": False,
+                "target_minutes": max(1, int(horizon_minutes)),
+                "error": "Invalid review timestamp.",
+            }
+
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT s.*
+                FROM market_samples s
+                WHERE UPPER(s.ticker)=?
+                ORDER BY s.captured_at ASC, s.id ASC
+                """,
+                (ticker.upper().strip(),),
+            ).fetchall()
+
+        result = _window_metrics(
+            [dict(row) for row in rows],
+            reference_time=review_time,
+            target_minutes=horizon_minutes,
+        )
+        result["ticker"] = ticker.upper().strip()
+        result["review_created_at"] = review_created_at
         return result
