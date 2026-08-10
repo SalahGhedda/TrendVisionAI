@@ -3,9 +3,16 @@ from __future__ import annotations
 import json
 import sqlite3
 from pathlib import Path
+from typing import Any
 
 from .models import CapturedNotification
 from .scanner_events import ScannerEvent
+from .ticker_memory import (
+    TickerEventRecord,
+    TickerState,
+    build_ticker_state,
+    convergence_summary,
+)
 
 
 SCHEMA = """
@@ -40,6 +47,21 @@ CREATE TABLE IF NOT EXISTS scanner_events (
 CREATE INDEX IF NOT EXISTS idx_scanner_events_ticker ON scanner_events(ticker);
 CREATE INDEX IF NOT EXISTS idx_scanner_events_channel ON scanner_events(channel);
 CREATE INDEX IF NOT EXISTS idx_scanner_events_received_at ON scanner_events(received_at);
+
+CREATE TABLE IF NOT EXISTS ticker_states (
+    ticker TEXT PRIMARY KEY,
+    first_seen_at TEXT NOT NULL,
+    last_seen_at TEXT NOT NULL,
+    event_count INTEGER NOT NULL,
+    channel_count INTEGER NOT NULL,
+    channels_json TEXT NOT NULL,
+    latest_event_type TEXT NOT NULL,
+    latest_headline TEXT NOT NULL,
+    facts_json TEXT NOT NULL,
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_ticker_states_last_seen_at ON ticker_states(last_seen_at);
+CREATE INDEX IF NOT EXISTS idx_ticker_states_channel_count ON ticker_states(channel_count);
 """
 
 
@@ -127,3 +149,137 @@ class AlertStore:
         except sqlite3.IntegrityError:
             return False
         return True
+
+    @staticmethod
+    def _decode_data(value: str) -> dict[str, Any]:
+        try:
+            decoded = json.loads(value or "{}")
+            return decoded if isinstance(decoded, dict) else {}
+        except json.JSONDecodeError:
+            return {}
+
+    def load_ticker_events(self, ticker: str) -> list[TickerEventRecord]:
+        ticker = ticker.upper().strip()
+        if not ticker:
+            return []
+
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT received_at, channel, event_type, headline, data_json
+                FROM scanner_events
+                WHERE UPPER(ticker) = ?
+                ORDER BY received_at ASC, id ASC
+                """,
+                (ticker,),
+            ).fetchall()
+
+        return [
+            TickerEventRecord(
+                received_at=row[0],
+                channel=row[1],
+                event_type=row[2],
+                headline=row[3],
+                data=self._decode_data(row[4]),
+            )
+            for row in rows
+        ]
+
+    def refresh_ticker_state(self, ticker: str) -> TickerState | None:
+        ticker = ticker.upper().strip()
+        if not ticker:
+            return None
+
+        state = build_ticker_state(ticker, self.load_ticker_events(ticker))
+        if state is None:
+            return None
+
+        with self._connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO ticker_states (
+                    ticker, first_seen_at, last_seen_at, event_count,
+                    channel_count, channels_json, latest_event_type,
+                    latest_headline, facts_json, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+                ON CONFLICT(ticker) DO UPDATE SET
+                    first_seen_at=excluded.first_seen_at,
+                    last_seen_at=excluded.last_seen_at,
+                    event_count=excluded.event_count,
+                    channel_count=excluded.channel_count,
+                    channels_json=excluded.channels_json,
+                    latest_event_type=excluded.latest_event_type,
+                    latest_headline=excluded.latest_headline,
+                    facts_json=excluded.facts_json,
+                    updated_at=CURRENT_TIMESTAMP
+                """,
+                (
+                    state.ticker,
+                    state.first_seen_at,
+                    state.last_seen_at,
+                    state.event_count,
+                    state.channel_count,
+                    json.dumps(state.channels, ensure_ascii=False),
+                    state.latest_event_type,
+                    state.latest_headline,
+                    json.dumps(state.facts, ensure_ascii=False, sort_keys=True),
+                ),
+            )
+        return state
+
+    def rebuild_ticker_states(self) -> int:
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT DISTINCT UPPER(ticker)
+                FROM scanner_events
+                WHERE ticker IS NOT NULL AND TRIM(ticker) <> ''
+                ORDER BY UPPER(ticker)
+                """
+            ).fetchall()
+            connection.execute("DELETE FROM ticker_states")
+
+        rebuilt = 0
+        for row in rows:
+            if self.refresh_ticker_state(row[0]) is not None:
+                rebuilt += 1
+        return rebuilt
+
+    def get_convergence_summary(self, ticker: str, window_minutes: int = 30) -> dict[str, Any]:
+        ticker = ticker.upper().strip()
+        return convergence_summary(
+            ticker,
+            self.load_ticker_events(ticker),
+            window_minutes=window_minutes,
+        )
+
+    def list_ticker_states(self, limit: int = 25) -> list[dict[str, Any]]:
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT ticker, first_seen_at, last_seen_at, event_count,
+                       channel_count, channels_json, latest_event_type,
+                       latest_headline, facts_json
+                FROM ticker_states
+                ORDER BY last_seen_at DESC
+                LIMIT ?
+                """,
+                (max(1, limit),),
+            ).fetchall()
+
+        result: list[dict[str, Any]] = []
+        for row in rows:
+            result.append(
+                {
+                    "ticker": row[0],
+                    "first_seen_at": row[1],
+                    "last_seen_at": row[2],
+                    "event_count": row[3],
+                    "channel_count": row[4],
+                    "channels": json.loads(row[5] or "[]"),
+                    "latest_event_type": row[6],
+                    "latest_headline": row[7],
+                    "facts": self._decode_data(row[8]),
+                }
+            )
+        return result
