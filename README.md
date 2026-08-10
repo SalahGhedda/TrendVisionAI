@@ -2,7 +2,7 @@
 
 TrendVisionAI is a local Windows dashboard that captures TrendVision Discord scanner notifications, turns them into structured events, accumulates per-ticker memory, and can manually request an AI second-pass review of an interesting ticker.
 
-## Current milestone: high-attention market tracking
+## Current milestone: objective review calibration
 
 The app currently:
 
@@ -17,6 +17,7 @@ The app currently:
 9. Applies deterministic local guardrails after the model response.
 10. Stores user-labeled post-review outcomes for calibration.
 11. Automatically starts an Alpaca market-data tracking session when a ticker reaches local `HIGH ATTENTION`, then measures what happens afterward for up to four hours.
+12. Links Alpaca measurements back to each AI review so human labels can be compared with objective return, MFE and MAE data at the selected review horizon.
 
 There is **no brokerage integration, automatic order execution, or automatic AI scanning** in this version. Alpaca is used as a read-only market-data source; TrendVision remains the discovery source.
 
@@ -76,9 +77,14 @@ Each reviewed ticker has an outcome section. After enough time has passed, label
 - `TOO RISKY / UNTRADEABLE`
 - `NOT ENOUGH FOLLOW-UP`
 
-Choose a review horizon (15 min, 30 min, 60 min, or 4 hours) and optionally add notes. TrendVisionAI also records how many later scanner events/channels appeared during that horizon.
+Choose a review horizon (15 min, 30 min, 60 min, or 4 hours) and optionally add notes. The page now shows two independent follow-up layers for exactly that AI-review timestamp and horizon:
 
-The sidebar **Calibration Journal** page lists saved AI reviews and which ones have or have not been outcome-labeled.
+1. **TrendVision follow-up** — how many later scanner events/channels appeared.
+2. **Objective Alpaca outcome** — first market sample after the review as reference, last observed price, return, MFE, MAE, sample count and coverage progress.
+
+When an outcome is saved, the current objective market measurements are saved with it. If the selected horizon is still running, the UI marks the market snapshot as partial rather than pretending the horizon is complete.
+
+The sidebar **Calibration Journal** now compares AI labels, human outcome labels and objective market data in one table. For unlabeled reviews it shows a live 30-minute market outcome; for labeled reviews it preserves the market snapshot captured with that label.
 
 ### Market Tracking
 
@@ -94,12 +100,18 @@ When the local attention engine marks a ticker `HIGH ATTENTION`, TrendVisionAI a
 - daily volume when supplied by Alpaca
 - exact raw snapshot JSON for later debugging
 
-The first successful Alpaca snapshot after `HIGH ATTENTION` becomes the session's **reference price**. The page then calculates descriptive measurements such as:
+The first successful Alpaca snapshot after `HIGH ATTENTION` becomes the tracking session's **reference price**. The page calculates:
 
-- return from reference price
-- **MFE** (maximum favorable excursion) from stored minute highs
-- **MAE** (maximum adverse excursion) from stored minute lows
+- current return from tracking reference
+- **MFE** (maximum favorable excursion)
+- **MAE** (maximum adverse excursion)
+- elapsed tracking time
+- peak and trough price / approximate time from reference
+- maximum observed one-minute volume
+- return at completed 15m / 30m / 60m / 4h checkpoints
 - sample count and current feed/status
+
+The first minute bar is handled conservatively for review-specific MFE/MAE: because that minute may contain trades from before the AI review timestamp, its pre-reference high/low is not allowed to inflate the post-review excursion measurements.
 
 This is intentionally asymmetric:
 
@@ -107,9 +119,10 @@ This is intentionally asymmetric:
 TrendVision -> discovery / scanner convergence
 Alpaca      -> objective market measurement after HIGH ATTENTION
 AI          -> manual interpretation of the TrendVision case
+Journal     -> compare AI/human labels with what the market actually did
 ```
 
-The first implementation uses Alpaca REST snapshots rather than brokerage endpoints and never places an order.
+The current implementation uses Alpaca REST snapshots rather than brokerage endpoints and never places an order. The default free `IEX` feed is useful for building the tracking/calibration system, but its measurements are IEX-feed measurements rather than consolidated SIP measurements.
 
 ### Listener & System
 
@@ -139,7 +152,7 @@ Main SQLite layers:
 - `scanner_events` — channel-specific structured events
 - `ticker_states` — durable accumulated state for each ticker
 - `ai_reviews` — manually requested AI reviews plus the exact local case-file snapshot used for each review
-- `ai_review_outcomes` — manual outcome labels and post-review scanner follow-up counts
+- `ai_review_outcomes` — manual outcome labels, post-review scanner follow-up and saved objective Alpaca metrics
 - `market_tracking_sessions` — HIGH ATTENTION market-measurement sessions
 - `market_samples` — Alpaca snapshots collected during those sessions
 
@@ -175,9 +188,12 @@ The old scripts such as `show_ticker_memory.bat`, `show_attention_list.bat`, and
 - [x] AI review v3 calibration + supported-feed constraints
 - [x] Local review outcome journal
 - [x] Alpaca read-only HIGH ATTENTION market tracking
-- [x] Objective reference-price / return / MFE / MAE measurements
+- [x] Objective tracking-session reference / return / MFE / MAE measurements
+- [x] Review-specific objective market outcomes linked to the Calibration Journal
+- [x] 15m / 30m / 60m / 4h tracking checkpoints and peak/trough timing
 - [ ] Collect real tracked candidates and compare market outcomes to attention/AI labels
 - [ ] Backfill exact 1-minute historical bars at session completion for more precise outcome metrics
+- [ ] Build aggregate calibration statistics by scanner combination / signal / RV / risk bucket
 - [ ] Tune attention + AI review logic from observed outcomes
 - [ ] Decide which reviewed setups deserve a user-facing candidate alert
 - [ ] Optionally automate AI review only for high-quality local candidates
