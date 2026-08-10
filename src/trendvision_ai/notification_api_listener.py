@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -11,6 +12,27 @@ from .notification_api_probe import _extract_text, _get_listener
 from .parser import parse_uia_texts
 from .scanner_events import build_scanner_events
 from .storage import AlertStore
+
+
+def _configure_stdio_utf8() -> None:
+    """Make listener output safe across Windows locale/code-page settings.
+
+    Discord/WinRT notification text can contain Unicode formatting controls,
+    emoji, flags, smart punctuation and non-Latin characters. Some Windows
+    installations still expose stdout/stderr as cp1252, which can crash the
+    listener merely while printing a notification. The raw notification is
+    already stored as UTF-8, so the diagnostic stream should be UTF-8 too.
+    """
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if callable(reconfigure):
+            try:
+                reconfigure(encoding="utf-8", errors="backslashreplace")
+            except (OSError, ValueError):
+                pass
+
+
+_configure_stdio_utf8()
 
 
 def _build_parser() -> argparse.ArgumentParser:
