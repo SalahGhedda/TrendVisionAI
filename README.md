@@ -1,8 +1,10 @@
 # TrendVisionAI
 
-TrendVisionAI is a local Windows dashboard that captures TrendVision Discord scanner notifications, turns them into structured events, accumulates per-ticker memory, and can manually request an AI second-pass review of an interesting ticker.
+TrendVisionAI is a local Windows dashboard that captures TrendVision Discord scanner notifications, turns them into structured events, accumulates per-ticker memory, tracks HIGH ATTENTION cases with Alpaca market data, and calibrates what actually happened afterward.
 
-## Current milestone: aggregate calibration statistics
+## Current milestone: screenshot-enhanced trade-plan experiments
+
+The practical product goal is a **human-executed trade alert**: when sufficiently good conditions are eventually proven, TrendVisionAI should be able to alert the user with a candidate, entry zone, stop loss, targets, risk/reward, and the evidence behind the alert. The application does **not** place brokerage orders.
 
 The app currently:
 
@@ -12,19 +14,21 @@ The app currently:
 4. Stores everything in SQLite.
 5. Builds durable ticker memory across multiple scanner channels.
 6. Ranks recent scanner convergence into an **attention list** for review.
-7. Presents the workflow through a PySide6 desktop UI.
-8. Lets the user manually send one ticker's recent TrendVision case file to the OpenAI Responses API for a structured candidate review.
-9. Applies deterministic local guardrails after the model response.
-10. Automatically starts an Alpaca market-data tracking session when a ticker reaches local `HIGH ATTENTION`, then measures what happens afterward for up to four hours.
-11. Automatically classifies completed 15m / 30m / 60m / 4h price paths for every tracked market session.
-12. Automatically classifies the same horizons relative to each AI review timestamp, so AI assessments can be compared with what objectively happened afterward without requiring manual trading judgment.
-13. Freezes detection-time TrendVision features around each HIGH ATTENTION trigger and aggregates later automatic outcomes by scanner convergence, signal, relative-volume, extension, market-cap and risk-condition buckets.
+7. Lets the user manually request a structured OpenAI candidate review.
+8. Automatically starts Alpaca market tracking when a ticker reaches local `HIGH ATTENTION`.
+9. Measures reference price, return, MFE, MAE, spread and volume observations for up to four hours.
+10. Automatically classifies completed 15m / 30m / 60m / 4h market paths.
+11. Freezes detection-time TrendVision conditions and builds aggregate calibration statistics.
+12. Lets the user paste or choose a **current chart screenshot** for a HIGH ATTENTION ticker.
+13. Sends the screenshot together with stored TrendVision evidence and latest Alpaca measurements to the OpenAI Responses API for an experimental multimodal trade-plan review.
+14. Saves potential entry / stop / T1 / T2 plans only when deterministic long-plan guardrails pass.
+15. Automatically follows each saved plan with Alpaca samples to measure whether the proposed entry was observed and whether stop / T1 / T2 were subsequently observed.
 
-There is **no brokerage integration, automatic order execution, or automatic AI scanning** in this version. Alpaca is used as a read-only market-data source; TrendVision remains the discovery source.
+There is **no brokerage integration or automatic order execution**. Alpaca is read-only market data; TrendVision remains discovery; the user remains the person who decides whether to trade.
 
 ## Setup
 
-Run once after cloning, and again whenever dependencies change:
+Run once after cloning, and again only when dependencies change:
 
 ```text
 scripts\setup.bat
@@ -32,173 +36,163 @@ scripts\setup.bat
 
 ## Start TrendVisionAI
 
-Stop any old terminal listener first, then launch:
-
 ```text
 scripts\run_ui.bat
 ```
 
-The desktop app automatically starts and stops its own Windows notification listener and market-data tracking controller.
+The desktop app starts its Windows notification listener and market tracker automatically.
+
+## Core workflow
+
+```text
+TrendVision Discord alerts
+        ↓
+Ticker memory + scanner convergence
+        ↓
+Attention ranking
+        ↓
+HIGH ATTENTION
+        ↓
+Alpaca read-only market tracking
+        ↓
+Automatic 15m / 30m / 60m / 4h outcomes
+        ↓
+Calibration Statistics
+```
+
+The new optional trade-plan experiment runs in parallel:
+
+```text
+HIGH ATTENTION ticker
+        ↓
+User pastes current chart screenshot
+        ↓
+TrendVision evidence
++ latest Alpaca measurements
++ chart screenshot
+        ↓
+OpenAI multimodal review
+        ↓
+REJECT / WATCH / POTENTIAL TRADE
+        ↓
+If POTENTIAL TRADE:
+Entry zone + Stop + T1 + T2 + R/R + invalidation
+        ↓
+Save plan
+        ↓
+Objective Alpaca follow-up
+```
+
+The screenshot experiment does **not** replace the existing calibration pipeline. Both continue at the same time.
 
 ## UI screens
 
 ### Dashboard
 
-Shows the recent **Attention List** with ticker, attention tier, score, recent events, independent scanner channels, contributing scanner types, and explanation/risk flags.
-
-The ranking is a review-priority tool, **not a buy/sell signal**.
+Shows the recent Attention List with ticker, attention tier, score, events, scanner channels and explanation/risk flags. Attention is review priority, not a guaranteed trade signal.
 
 ### Live Alerts
 
-A live table of structured TrendVision scanner events. Filter by ticker, text, or scanner channel. Double-click a ticker to open its memory.
+Shows structured TrendVision events. Double-click a ticker to open Ticker Memory.
 
 ### Ticker Memory
 
-Shows everything accumulated for one ticker: first/last appearance, total events, independent channels, latest known TrendVision facts, full activity timeline, latest saved AI candidate review, and automatic outcome calibration.
+Shows accumulated facts and the scanner timeline for one ticker.
 
-The **Analyze with AI** button is still manual in this phase. It sends only the TrendVision information already stored for the ticker inside a 30-minute recent-convergence window. It does not browse or add external chart/news/SEC/options data to the AI case file, and missing Discord-toast fields remain unknown rather than being invented.
+It also contains:
 
-AI Review v3 separates four questions:
+- **AI Candidate Review v3** — manual TrendVision-only second-pass review.
+- **Automatic Outcome Calibration** — objective post-review 15m / 30m / 60m / 4h behavior.
+- **Trade Plan Experiment v1** — paste or choose the current chart screenshot, then analyze the current case with TrendVision + Alpaca + chart vision.
 
-- **Interest** — how unusual / worthy of attention the scanner convergence is (`LOW` to `VERY HIGH`)
-- **Risk** — how dangerous, extended, halted, volatile or chase-prone it is (`LOW` to `EXTREME`)
-- **Evidence quality** — how complete and internally consistent the captured evidence is (`LOW` to `HIGH`)
-- **Review status** — `IGNORE`, `WATCH`, `WAIT FOR CONFIRMATION`, `POTENTIAL SETUP`, or `AVOID`
+For Trade Plan Experiment v1, a `POTENTIAL TRADE` can contain:
 
-V3 treats different prices/change percentages at different timestamps as normal time-series updates rather than contradictions, treats HALTED UP/HALTED DOWN events at different times as chronology rather than data conflict, normalizes legacy unobserved `zero_borrow=false` values to unknown, and filters unsupported future-signal suggestions.
+- entry zone
+- stop loss
+- target 1
+- target 2
+- conservative risk/reward based on the top of the entry zone
+- entry trigger
+- invalidation
+- chart observations
+- positive/risk factors
+- what still needs confirmation
 
-### Automatic Outcome Calibration
+If the model returns incoherent long-side levels, EXTREME risk, dangerous/unclear chart structure, multiple recent halts, or a 100%+ recent move, deterministic v1 guardrails prevent the case from being promoted to `POTENTIAL TRADE` and actionable levels are removed.
 
-The old manual outcome-label workflow is no longer required for normal use.
-
-For each AI review, TrendVisionAI automatically evaluates the observed Alpaca price path after 15 minutes, 30 minutes, 60 minutes and 4 hours. The classification engine uses only measurable facts such as return, MFE, MAE, coverage, sample freshness, spread observations and halt events.
-
-Current objective labels are:
-
-- `STRONG UP CONTINUATION`
-- `MODEST UP CONTINUATION`
-- `SPIKE THEN REVERSAL`
-- `TWO-SIDED VOLATILITY`
-- `STRONG DOWN MOVE`
-- `NEGATIVE OUTCOME`
-- `MIXED / RANGE`
-- `INSUFFICIENT DATA`
-
-These labels describe the path that occurred. They do **not** mean buy, sell, good trade, or bad trade.
-
-The engine refuses to treat a completed horizon as valid when the stored samples are too stale or coverage is inadequate. It also stores the exact raw metrics used for every classification so thresholds can be changed later without losing the underlying evidence.
-
-The Ticker Memory page lets the user switch between 15m / 30m / 60m / 4h and see:
-
-1. the automatic objective label and confidence,
-2. the reason for the label,
-3. objective risk/quality flags such as observed halts or wide spreads,
-4. TrendVision follow-up scanner activity,
-5. Alpaca reference, return, MFE, MAE, sample count and coverage.
-
-No outcome selection or trading expertise is required from the user.
+Chart vision is used for qualitative structure. Exact numeric market values come from the stored Alpaca snapshot supplied to the request.
 
 ### Calibration Journal
 
-The sidebar **Calibration Journal** compares the AI assessment with automatically generated objective outcomes.
-
-It shows the 15m market measurements plus automatic 15m / 30m / 60m / 4h labels as each horizon becomes available. This dataset lets us evaluate whether AI statuses such as `WAIT FOR CONFIRMATION` or `POTENTIAL SETUP` line up with later objective behavior.
-
-Legacy manual labels already stored in `ai_review_outcomes` are kept for history, but they are no longer required by the UI or by the automatic calibration loop.
+Compares saved AI candidate reviews against automatic objective outcomes.
 
 ### Market Tracking
 
-This page is the objective measurement layer.
+When a ticker reaches `HIGH ATTENTION`, TrendVisionAI creates a read-only Alpaca tracking session for up to four hours and polls snapshots every 15 seconds.
 
-When the local attention engine marks a ticker `HIGH ATTENTION`, TrendVisionAI automatically creates a read-only market tracking session for up to 4 hours. It polls Alpaca's multi-symbol stock snapshot endpoint every 15 seconds and stores:
+Stored observations include:
 
 - latest trade price / size
-- latest bid / ask and sizes
-- bid/ask spread and spread percentage
-- latest minute OHLCV bar
-- minute VWAP when supplied by Alpaca
-- daily volume when supplied by Alpaca
-- exact raw snapshot JSON for later debugging
+- bid / ask and sizes
+- spread / spread percentage
+- minute OHLCV
+- minute VWAP when supplied
+- daily volume when supplied
+- raw snapshot JSON
 
-The first successful Alpaca snapshot after `HIGH ATTENTION` becomes the tracking session's **reference price**. The page calculates:
+The first successful sample becomes the tracking reference. The page calculates return, MFE, MAE, peak/trough timing, volume/spread metrics and automatic horizon outcomes.
 
-- current return from tracking reference
-- **MFE** (maximum favorable excursion)
-- **MAE** (maximum adverse excursion)
-- elapsed tracking time
-- peak and trough price / approximate time from reference
-- maximum observed one-minute volume
-- maximum observed spread percentage
-- return at completed 15m / 30m / 60m / 4h checkpoints
-- sample count and current feed/status
-
-The page also shows the automatically generated 15-minute outcome directly in the tracking table. Selecting a session shows automatic 15m / 30m / 60m / 4h classifications with return/MFE/MAE and objective flags.
-
-The first minute bar is handled conservatively: because that minute may contain trades from before the reference timestamp, its pre-reference high/low is not allowed to inflate post-reference MFE/MAE.
+The default free `IEX` feed is not consolidated SIP data.
 
 ### Calibration Statistics
 
-This page answers the next question in the feedback loop: **which conditions present at detection time are associated with which later market outcomes?**
+Freezes a 30-minute pre-trigger TrendVision feature snapshot for each HIGH ATTENTION tracking session and compares detection-time conditions with later objective outcomes.
 
-For each HIGH ATTENTION tracking session, TrendVisionAI builds a frozen 30-minute pre-trigger feature snapshot from stored TrendVision events. The snapshot includes currently observable factors such as:
+Examples of grouped conditions include:
 
-- attention score bucket
-- number of independent scanner channels
-- individual scanner-channel presence and exact channel combinations
-- signal labels such as `BREAKOUT` or `MOMENTUM`
-- maximum observed relative-volume bucket
-- pre-trigger percentage-extension bucket
-- latest observed market-cap bucket when available
-- zero-borrow observation
-- whale up/down observation
+- attention-score bucket
+- number of scanner channels
+- exact channel combinations
+- BREAKOUT / MOMENTUM and other observed signal labels
+- relative-volume bucket
+- extension bucket
+- market-cap bucket when available
+- zero borrow observation
+- whale direction
 - pre-trigger halt observation
-- a small set of explicit compound conditions such as `BREAKOUT + RV>=10x` or `3+ CHANNELS + RV>=10x`
+- compound patterns such as `BREAKOUT + RV>=10x`
 
-The page can compare those patterns against automatic 15m / 30m / 60m / 4h outcomes and shows:
+Statistics include sample count, median return, median MFE, median MAE, up-continuation rate, spike/reversal rate and negative-outcome rate.
 
-- sample count
-- median return
-- median MFE
-- median MAE
-- up-continuation rate
-- spike/reversal rate
-- negative-outcome rate
-- sample-maturity label
+Sample maturity:
 
-Sample-maturity labels are intentionally conservative:
-
-- `<5` observations — `TOO EARLY`
+- `<5` — `TOO EARLY`
 - `5-14` — `EARLY`
 - `15-29` — `BUILDING`
 - `30+` — `MORE STABLE`
 
-These are **not statistical-significance claims**. They simply prevent tiny samples from looking more trustworthy than they are. The attention algorithm is not automatically changed from these statistics; tuning comes later after enough observations accumulate.
+These labels are not statistical-significance claims and do not automatically change the attention algorithm.
 
-The workflow is intentionally asymmetric:
+### Trade Plan Experiments
 
-```text
-TrendVision -> discovery / scanner convergence
-Alpaca      -> objective market measurement after HIGH ATTENTION
-AI          -> manual interpretation of the TrendVision case (for now)
-Auto outcome-> objective post-alert/review classification
-Statistics  -> compare detection-time conditions with later behavior
-```
+Shows all saved screenshot-enhanced trade plans and their objective follow-up.
 
-The current implementation uses Alpaca REST snapshots rather than brokerage endpoints and never places an order. The default free `IEX` feed is useful for building the tracking/calibration system, but its measurements are IEX-feed measurements rather than consolidated SIP measurements.
+For plans that passed `POTENTIAL TRADE`, the evaluator watches stored post-plan Alpaca sampled trade prices and records descriptive statuses such as:
+
+- `WAITING FOR ENTRY`
+- `ENTRY NOT REACHED`
+- `OPEN / IN PROGRESS`
+- `TARGET 1 HIT / OPEN`
+- `TARGET 1 ONLY`
+- `TARGET 2 HIT`
+- `STOP HIT FIRST`
+- `TARGET 1 THEN STOP`
+
+It also stores observed entry time/price and post-entry max return / max drawdown. This measures the proposed plan; it does not claim that the user personally entered the trade.
 
 ### Listener & System
 
-Shows whether the Windows notification listener is running, lets you start/stop it, and displays its diagnostic log.
-
-This page contains both OpenAI review settings and Alpaca market-data settings. API secrets are stored through Windows Credential Manager rather than in `config.json` or the Git repository.
-
-For Alpaca, save both the **API key ID** and **secret key**, then choose a feed:
-
-- `IEX` — default; appropriate for the initial Basic/free prototype
-- `SIP` — consolidated US-exchange feed when the Alpaca subscription permits it
-- `Delayed SIP` — consolidated data with delay
-
-Changing the feed does not alter existing stored samples; each session/sample records which feed produced it.
+Contains listener controls plus OpenAI and Alpaca configuration. API credentials are stored through Windows Credential Manager rather than in the repository.
 
 ## Storage
 
@@ -206,21 +200,24 @@ Changing the feed does not alter existing stored samples; each session/sample re
 data\trendvision.db
 data\raw_notifications.jsonl
 data\winrt_candidates.jsonl
+data\trade_plan_images\...
 ```
+
+`data/*` is gitignored.
 
 Main SQLite layers:
 
-- `raw_notifications` — normalized notifications captured from Windows
-- `scanner_events` — channel-specific structured events
-- `ticker_states` — durable accumulated state for each ticker
-- `ai_reviews` — manually requested AI reviews plus the exact local case-file snapshot used for each review
-- `ai_review_outcomes` — legacy/manual outcome records retained for history
-- `market_tracking_sessions` — HIGH ATTENTION market-measurement sessions
-- `market_samples` — Alpaca snapshots collected during those sessions
-- `automatic_outcomes` — deterministic objective outcomes for market sessions and AI reviews at 15m / 30m / 60m / 4h
-- `calibration_feature_snapshots` — frozen detection-time feature/tag snapshots used by aggregate calibration statistics
-
-`all-in-one-scanner` can create multiple ticker events from a single Discord notification.
+- `raw_notifications`
+- `scanner_events`
+- `ticker_states`
+- `ai_reviews`
+- `ai_review_outcomes` — legacy/manual history
+- `market_tracking_sessions`
+- `market_samples`
+- `automatic_outcomes`
+- `calibration_feature_snapshots`
+- `trade_plans` — saved screenshot-enhanced AI plans and exact request snapshot
+- `trade_plan_evaluations` — objective sampled-price follow-up for saved plans
 
 ## Supported TrendVision channels
 
@@ -234,36 +231,31 @@ Main SQLite layers:
 - `halt-scanner`
 - `ipo-scanner`
 
-## Legacy development commands
-
-The old scripts such as `show_ticker_memory.bat`, `show_attention_list.bat`, and `inspect_candidates.bat` remain useful for debugging, but normal use should happen through `run_ui.bat`.
-
 ## Roadmap
 
-- [x] Windows notification API capture
-- [x] Channel-specific scanner parsing
+- [x] Windows notification capture
+- [x] Channel-specific parsing
 - [x] SQLite / JSONL persistence
-- [x] Multi-item all-in-one handling
-- [x] Ticker memory
-- [x] Recent convergence logic
+- [x] Ticker memory and scanner convergence
 - [x] Explainable attention ranking
 - [x] Desktop dashboard
-- [x] Manual AI candidate review
-- [x] AI review v3 calibration + supported-feed constraints
-- [x] Alpaca read-only HIGH ATTENTION market tracking
-- [x] Objective tracking-session reference / return / MFE / MAE measurements
-- [x] Review-specific objective market outcomes
-- [x] 15m / 30m / 60m / 4h tracking checkpoints and peak/trough timing
-- [x] Automatic objective outcome classification; manual labels no longer required
-- [x] Aggregate calibration statistics by scanner combination / signal / RV / extension / risk bucket
-- [ ] Collect enough real tracked candidates for pattern-level sample sizes to become meaningful
-- [ ] Backfill exact 1-minute historical bars at session completion for more precise outcome metrics
-- [ ] Tune attention + AI review logic from observed outcomes
-- [ ] Automatically trigger AI review only for high-quality local candidates
-- [ ] Add automatic paper-trade simulation for qualified candidates
-- [ ] Evaluate paper-trading results before any live execution work
-- [ ] Add user-facing trade-candidate notification / approval layer
+- [x] AI candidate review v3
+- [x] Alpaca read-only HIGH ATTENTION tracking
+- [x] Objective return / MFE / MAE measurements
+- [x] Automatic 15m / 30m / 60m / 4h outcome classification
+- [x] Aggregate calibration statistics
+- [x] Manual chart screenshot input
+- [x] Multimodal TrendVision + Alpaca + chart Trade Plan Experiment v1
+- [x] Persist entry / stop / T1 / T2 experiments
+- [x] Objective post-plan sampled-price evaluation
+- [ ] Collect enough real HIGH ATTENTION and trade-plan cases for meaningful calibration
+- [ ] Backfill exact historical 1-minute bars for more precise outcome/trade-plan evaluation
+- [ ] Compare scanner-only vs scanner+market vs scanner+market+chart usefulness
+- [ ] Tune qualification rules only after enough evidence exists
+- [ ] Build Candidate Qualification Engine
+- [ ] Turn qualified, validated plans into user-facing real-time trade alerts
+- [ ] User manually decides and executes trades
 
-## Safety
+## Safety / interpretation
 
-TrendVisionAI organizes, measures, and prioritizes market information. Automatic outcome labels, AI reviews, aggregate statistics and attention levels do not guarantee profitable trades. The application does not place brokerage orders.
+TrendVisionAI is an experimental decision-support and calibration application. Attention tiers, AI reviews, chart interpretations, statistical patterns and trade-plan levels do not guarantee profitability. The current trade-plan output is being measured precisely because it is **not yet considered a proven alert system**. No brokerage order is placed by the application.
