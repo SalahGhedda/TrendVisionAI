@@ -213,6 +213,7 @@ def _window_metrics(
     target_minutes = max(1, int(target_minutes))
     deadline = reference_time + timedelta(minutes=target_minutes)
     now = _now()
+    horizon_complete = _seconds_between(now, deadline) >= 0
 
     eligible: list[tuple[datetime, dict[str, Any]]] = []
     for row in rows:
@@ -228,7 +229,9 @@ def _window_metrics(
     base = {
         "available": False,
         "target_minutes": target_minutes,
-        "horizon_complete": _seconds_between(now, deadline) >= 0,
+        "horizon_complete": horizon_complete,
+        "fresh_to_horizon": False,
+        "horizon_gap_seconds": None,
         "sample_count": 0,
         "coverage_minutes": 0.0,
         "coverage_pct": 0.0,
@@ -247,6 +250,7 @@ def _window_metrics(
         "time_to_trough_minutes": None,
         "max_minute_volume": None,
         "latest_spread_pct": None,
+        "max_spread_pct": None,
         "feeds": [],
     }
     if not eligible:
@@ -263,6 +267,7 @@ def _window_metrics(
     peak_time = reference_captured
     trough_time = reference_captured
     minute_volumes: dict[str, float] = {}
+    spread_values: list[float] = []
     feeds: list[str] = []
 
     for captured, row in eligible:
@@ -294,6 +299,10 @@ def _window_metrics(
             minute_key = str(row.get("minute_timestamp") or row.get("captured_at"))
             minute_volumes[minute_key] = max(volume, minute_volumes.get(minute_key, 0.0))
 
+        spread_pct = _num(row.get("spread_pct"))
+        if spread_pct is not None and spread_pct >= 0:
+            spread_values.append(spread_pct)
+
         feed = str(row.get("feed") or "").upper()
         if feed and feed not in feeds:
             feeds.append(feed)
@@ -301,6 +310,8 @@ def _window_metrics(
     last_captured, last = eligible[-1]
     last_price = _sample_price(last)
     coverage_minutes = max(0.0, _seconds_between(last_captured, reference_time) / 60.0)
+    horizon_gap_seconds = max(0.0, _seconds_between(deadline, last_captured))
+    fresh_to_horizon = bool(horizon_complete and horizon_gap_seconds <= 60.0)
 
     base.update(
         {
@@ -327,6 +338,9 @@ def _window_metrics(
             ),
             "max_minute_volume": max(minute_volumes.values()) if minute_volumes else None,
             "latest_spread_pct": _num(last.get("spread_pct")),
+            "max_spread_pct": max(spread_values) if spread_values else None,
+            "horizon_gap_seconds": horizon_gap_seconds,
+            "fresh_to_horizon": fresh_to_horizon,
             "feeds": feeds,
         }
     )
@@ -358,8 +372,8 @@ def _return_at_horizon(
     captured, row = candidates[-1]
 
     # The tracker polls every 15 seconds. Requiring a sample within the final
-    # minute prevents a stale 2-minute observation from masquerading as a 30m
-    # outcome if tracking stopped or failed.
+    # minute prevents a stale observation from masquerading as a completed
+    # horizon if tracking stopped or failed.
     if _seconds_between(deadline, captured) > 60:
         return None
     return _pct_change(_sample_price(row), reference_price)
@@ -605,6 +619,58 @@ class MarketDataStore:
             ).fetchall()
         return [dict(row) for row in rows]
 
+    def session_horizon_metrics(
+        self,
+        *,
+        session_id: int,
+        horizon_minutes: int,
+    ) -> dict[str, Any]:
+        with self._connect() as connection:
+            session = connection.execute(
+                "SELECT * FROM market_tracking_sessions WHERE id=?",
+                (int(session_id),),
+            ).fetchone()
+        if session is None:
+            return {
+                "available": False,
+                "target_minutes": max(1, int(horizon_minutes)),
+                "horizon_complete": False,
+                "error": "Unknown market tracking session.",
+            }
+
+        session_dict = dict(session)
+        rows = self._session_rows(session_id)
+        reference_time = _parse_time(session_dict.get("reference_captured_at"))
+        if reference_time is None and rows:
+            reference_time = _parse_time(rows[0].get("captured_at"))
+        if reference_time is None:
+            started = _parse_time(session_dict.get("started_at"))
+            if started is None:
+                return {
+                    "available": False,
+                    "target_minutes": max(1, int(horizon_minutes)),
+                    "horizon_complete": False,
+                    "error": "No valid session reference timestamp.",
+                }
+            # No successful market sample exists yet. Still return whether the
+            # requested horizon has elapsed so the automatic outcome engine can
+            # record insufficient coverage rather than waiting forever.
+            result = _window_metrics(
+                rows,
+                reference_time=started,
+                target_minutes=horizon_minutes,
+            )
+        else:
+            result = _window_metrics(
+                rows,
+                reference_time=reference_time,
+                target_minutes=horizon_minutes,
+            )
+        result["session_id"] = int(session_id)
+        result["ticker"] = str(session_dict.get("ticker") or "").upper()
+        result["session_started_at"] = session_dict.get("started_at")
+        return result
+
     def session_metrics(self, session_id: int) -> dict[str, Any]:
         with self._connect() as connection:
             session = connection.execute(
@@ -634,6 +700,7 @@ class MarketDataStore:
         result["time_to_peak_minutes"] = None
         result["time_to_trough_minutes"] = None
         result["max_minute_volume"] = None
+        result["max_spread_pct"] = None
         result["elapsed_minutes"] = 0.0
         result["horizon_returns"] = {minutes: None for minutes in TRACKING_HORIZONS}
 
@@ -651,6 +718,7 @@ class MarketDataStore:
                 "time_to_peak_minutes",
                 "time_to_trough_minutes",
                 "max_minute_volume",
+                "max_spread_pct",
                 "coverage_minutes",
             ):
                 if key in metrics:
@@ -681,6 +749,7 @@ class MarketDataStore:
             return {
                 "available": False,
                 "target_minutes": max(1, int(horizon_minutes)),
+                "horizon_complete": False,
                 "error": "Invalid review timestamp.",
             }
 
