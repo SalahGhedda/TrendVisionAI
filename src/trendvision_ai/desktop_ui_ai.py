@@ -52,25 +52,47 @@ class ReviewWorker(QThread):
 
 
 def _format_review(review: dict[str, Any]) -> str:
-    verdict = str(review.get("verdict") or "-")
-    confidence = str(review.get("confidence") or "-")
+    """Format both current v2 reviews and older saved v1 reviews."""
     model = str(review.get("model") or "-")
     created = str(review.get("created_at") or "-")
     summary = str(review.get("summary") or "")
 
-    lines = [
-        f"VERDICT: {verdict}    CONFIDENCE: {confidence}",
-        f"Model: {model}    Reviewed: {created}",
-        "",
-        summary,
-    ]
+    if review.get("review_version") == 2 or "interest_level" in review:
+        interest = str(review.get("interest_level") or "-")
+        risk = str(review.get("risk_level") or "-")
+        evidence = str(review.get("evidence_quality") or "-")
+        status = str(review.get("review_status") or "-")
+        lines = [
+            f"INTEREST: {interest}    RISK: {risk}",
+            f"EVIDENCE: {evidence}    STATUS: {status}",
+            f"Model: {model}    Reviewed: {created}",
+            "",
+            summary,
+        ]
+        sections = [
+            ("Why it is interesting", review.get("positive_factors") or []),
+            ("Why it is dangerous", review.get("risk_factors") or []),
+            ("Data conflicts", review.get("data_conflicts") or []),
+            ("Missing information", review.get("missing_information") or []),
+            ("What TrendVision should show next", review.get("next_signals_to_watch") or []),
+            ("Invalidation / warning signals", review.get("invalidation_warnings") or []),
+        ]
+    else:
+        verdict = str(review.get("verdict") or "-")
+        confidence = str(review.get("confidence") or "-")
+        lines = [
+            f"LEGACY REVIEW — VERDICT: {verdict}    CONFIDENCE: {confidence}",
+            f"Model: {model}    Reviewed: {created}",
+            "",
+            summary,
+        ]
+        sections = [
+            ("Positive factors", review.get("positive_factors") or []),
+            ("Risks", review.get("risk_factors") or []),
+            ("Missing information", review.get("missing_information") or []),
+            ("Next signals to watch", review.get("next_signals_to_watch") or []),
+        ]
 
-    sections = [
-        ("Positive factors", review.get("positive_factors") or []),
-        ("Risks", review.get("risk_factors") or []),
-        ("Missing information", review.get("missing_information") or []),
-        ("Next signals to watch", review.get("next_signals_to_watch") or []),
-    ]
     for title, values in sections:
         lines.extend(["", title + ":"])
         if values:
@@ -96,10 +118,10 @@ class AITickerMemoryPage(base.TickerMemoryPage):
 
         top = QHBoxLayout()
         title_box = QVBoxLayout()
-        title = QLabel("AI Candidate Review")
+        title = QLabel("AI Candidate Review v2")
         title.setStyleSheet("font-size: 12pt; font-weight: 600;")
         subtitle = QLabel(
-            "Manual review using only the TrendVision data already captured for this ticker."
+            "Manual second-pass review. Interest, risk and evidence quality are scored separately so an exciting runner is not mistaken for a safe setup."
         )
         subtitle.setObjectName("muted")
         subtitle.setWordWrap(True)
@@ -113,14 +135,14 @@ class AITickerMemoryPage(base.TickerMemoryPage):
         card_layout.addLayout(top)
 
         self.review_status = QLabel(
-            "Open a ticker, then analyze it when you want a second-pass review."
+            "Open a ticker, then analyze it when you want a calibrated second-pass review."
         )
         self.review_status.setObjectName("muted")
         card_layout.addWidget(self.review_status)
 
         self.review_text = QTextEdit()
         self.review_text.setReadOnly(True)
-        self.review_text.setMaximumHeight(230)
+        self.review_text.setMaximumHeight(320)
         self.review_text.setPlaceholderText("No AI review saved for this ticker yet.")
         card_layout.addWidget(self.review_text)
 
@@ -143,7 +165,10 @@ class AITickerMemoryPage(base.TickerMemoryPage):
             )
             return
         self.review_text.setPlainText(_format_review(latest))
-        self.review_status.setText(f"Showing latest saved AI review for {self.current_ticker}.")
+        version = latest.get("review_version", 1)
+        self.review_status.setText(
+            f"Showing latest saved AI review for {self.current_ticker} (review v{version})."
+        )
 
     def analyze_current(self) -> None:
         ticker = self.current_ticker.upper().strip()
@@ -185,7 +210,7 @@ class AITickerMemoryPage(base.TickerMemoryPage):
         self.analyze_button.setEnabled(False)
         self.analyze_button.setText("Analyzing...")
         self.review_status.setText(
-            f"Analyzing {ticker} with {model}. No external market-data lookup is being performed."
+            f"Analyzing {ticker} with {model}. Applying local risk/evidence guardrails after the model response."
         )
 
         worker = ReviewWorker(snapshot=snapshot, model=model, api_key=api_key)
@@ -201,7 +226,7 @@ class AITickerMemoryPage(base.TickerMemoryPage):
         data = result.to_dict()
         self.review_text.setPlainText(_format_review(data))
         self.review_status.setText(
-            f"Review saved for {result.ticker}. Verdict: {result.verdict} ({result.confidence} confidence)."
+            f"Review saved for {result.ticker}. Status: {result.review_status} | Interest: {result.interest_level} | Risk: {result.risk_level}."
         )
 
     def _analysis_failed(self, message: str) -> None:
