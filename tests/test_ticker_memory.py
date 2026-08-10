@@ -1,3 +1,5 @@
+from datetime import datetime
+
 from trendvision_ai.ticker_memory import (
     TickerEventRecord,
     build_ticker_state,
@@ -54,7 +56,12 @@ def test_recent_convergence_does_not_mix_old_alerts():
         event("2026-08-10T09:20:00-04:00", "potential-squeeze-alerts", "Squeeze alert"),
     ]
 
-    summary = convergence_summary("LRHC", events, window_minutes=30)
+    summary = convergence_summary(
+        "LRHC",
+        events,
+        window_minutes=30,
+        reference_time=datetime.fromisoformat("2026-08-10T09:22:00-04:00"),
+    )
     assert summary["event_count"] == 3
     assert summary["channel_count"] == 3
     assert summary["channels"] == [
