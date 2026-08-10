@@ -113,7 +113,7 @@ def test_trade_plan_stats_aggregate_resolved_outcomes(tmp_path: Path):
 def test_qualification_stays_locked_before_global_minimum(tmp_path: Path):
     database = tmp_path / "qualification-small.db"
     store = TradePlanStore(database)
-    _seed_feature_snapshot(database, 1, ["ALL HIGH ATTENTION", "SIGNAL: BREAKOUT"])
+    _seed_feature_snapshot(database, 1, ["ALL HIGH ATTENTION", "SIGNAL: BREAKOUT", "RV: 20x+"])
     for _ in range(15):
         _add_plan(store, 1, "TARGET 2 HIT")
 
@@ -122,10 +122,10 @@ def test_qualification_stays_locked_before_global_minimum(tmp_path: Path):
     assert result["global_resolved"] == 15
 
 
-def test_qualification_can_promote_after_enough_positive_history(tmp_path: Path):
+def test_qualification_can_promote_after_enough_specific_positive_history(tmp_path: Path):
     database = tmp_path / "qualification-ready.db"
     store = TradePlanStore(database)
-    tags = ["ALL HIGH ATTENTION", "SIGNAL: BREAKOUT"]
+    tags = ["ALL HIGH ATTENTION", "SIGNAL: BREAKOUT", "RV: 20x+"]
     _seed_feature_snapshot(database, 1, tags)
     for _ in range(30):
         _add_plan(store, 1, "TARGET 2 HIT")
@@ -134,4 +134,5 @@ def test_qualification_can_promote_after_enough_positive_history(tmp_path: Path)
     assert result["status"] == "EXPERIMENTALLY QUALIFIED"
     assert result["global_resolved"] == 30
     assert len(result["positive_patterns"]) >= 2
+    assert all(row["pattern"] != "ALL HIGH ATTENTION" for row in result["positive_patterns"])
     assert not result["negative_patterns"]
