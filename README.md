@@ -1,8 +1,8 @@
 # TrendVisionAI
 
-TrendVisionAI is a local Windows dashboard that captures TrendVision Discord scanner notifications, turns them into structured events, and accumulates per-ticker memory.
+TrendVisionAI is a local Windows dashboard that captures TrendVision Discord scanner notifications, turns them into structured events, accumulates per-ticker memory, and can manually request an AI second-pass review of an interesting ticker.
 
-## Current milestone: Desktop dashboard
+## Current milestone: Manual AI candidate review
 
 The app currently:
 
@@ -13,8 +13,9 @@ The app currently:
 5. Builds durable ticker memory across multiple scanner channels.
 6. Ranks recent scanner convergence into an **attention list** for review.
 7. Presents the workflow through a PySide6 desktop UI.
+8. Lets the user manually send one ticker's recent TrendVision case file to the OpenAI Responses API for a structured candidate review.
 
-There is **no brokerage integration, automatic order execution, OpenAI evaluation, or external market-data enrichment** in this version.
+There is **no brokerage integration, automatic order execution, automatic AI scanning, or external market-data enrichment** in this version.
 
 ## Setup
 
@@ -63,12 +64,19 @@ Shows everything accumulated for one ticker:
 - independent channels
 - latest known facts supplied by TrendVision
 - full activity timeline
+- latest saved AI candidate review
 
-Missing Discord-toast fields stay missing rather than being invented.
+The **Analyze with AI** button is manual. It sends only the TrendVision information already stored for the ticker inside a 30-minute recent-convergence window. It does not add external price/chart/news/SEC data, and missing Discord-toast fields remain unknown rather than being invented.
+
+AI reviews are saved in the local SQLite `ai_reviews` table so reopening the ticker shows the latest review.
 
 ### Listener & System
 
 Shows whether the Windows notification listener is running, lets you start/stop it, and displays its diagnostic log.
+
+This page also contains the OpenAI candidate-review settings. The API key is stored through the operating system credential store rather than in `config.json` or the Git repository. `OPENAI_API_KEY` is also supported when set in the environment.
+
+The default review model is `gpt-5-mini`; the model field is editable in the UI.
 
 ## Storage
 
@@ -83,6 +91,7 @@ Main SQLite layers:
 - `raw_notifications` — normalized notifications captured from Windows
 - `scanner_events` — channel-specific structured events
 - `ticker_states` — durable accumulated state for each ticker
+- `ai_reviews` — manually requested AI reviews plus the exact local case-file snapshot used for each review
 
 `all-in-one-scanner` can create multiple ticker events from a single Discord notification.
 
@@ -112,11 +121,12 @@ The old scripts such as `show_ticker_memory.bat`, `show_attention_list.bat`, and
 - [x] Recent convergence logic
 - [x] Explainable attention ranking
 - [x] Desktop dashboard
-- [ ] Tune attention rules from real outcomes
-- [ ] Decide when a setup deserves deeper analysis
-- [ ] Add AI evaluation only after local filtering is reliable
-- [ ] Add user-facing trade-candidate alerts
+- [x] Manual AI candidate review
+- [ ] Tune attention + AI review logic from real observed outcomes
+- [ ] Decide which AI-reviewed setups deserve a user-facing candidate alert
+- [ ] Optionally automate AI review only for high-quality local candidates
+- [ ] Add trade-candidate notification layer
 
 ## Safety
 
-TrendVisionAI organizes and prioritizes market information. It does not guarantee profitable trades and does not place brokerage orders.
+TrendVisionAI organizes and prioritizes market information. AI reviews are based only on the supplied scanner data, do not guarantee profitable trades, and do not place brokerage orders.
