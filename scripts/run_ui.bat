@@ -9,13 +9,15 @@ if not exist .venv\Scripts\python.exe (
     exit /b 1
 )
 
-.venv\Scripts\python.exe -c "import PySide6" >nul 2>&1
+.venv\Scripts\python.exe -c "import PySide6, openai, keyring" >nul 2>&1
 if errorlevel 1 (
-    echo ERROR: PySide6 is not installed yet.
+    echo ERROR: Desktop UI dependencies are not installed yet.
     echo Run scripts\setup.bat after git pull.
     pause
     exit /b 1
 )
 
+set PYTHONUTF8=1
+set PYTHONIOENCODING=utf-8
 set PYTHONPATH=%CD%\src
-.venv\Scripts\python.exe -m trendvision_ai.desktop_ui
+.venv\Scripts\python.exe -m trendvision_ai.desktop_ui_ai
