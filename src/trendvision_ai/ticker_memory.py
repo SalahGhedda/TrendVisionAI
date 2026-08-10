@@ -138,8 +138,13 @@ def convergence_summary(
     events: Iterable[TickerEventRecord],
     *,
     window_minutes: int = 30,
+    reference_time: datetime | None = None,
 ) -> dict[str, Any]:
-    recent = recent_events(events, window_minutes=window_minutes)
+    recent = recent_events(
+        events,
+        window_minutes=window_minutes,
+        reference_time=reference_time,
+    )
     channels: list[str] = []
     for event in recent:
         if event.channel not in channels:
