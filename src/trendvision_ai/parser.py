@@ -45,8 +45,17 @@ def _strip_format_chars(value: str) -> str:
     return "".join(ch for ch in value if unicodedata.category(ch) != "Cf")
 
 
+def _strip_discord_markdown(value: str) -> str:
+    # Discord/TrendVision sometimes puts Markdown markers directly in the
+    # Windows toast text (for example **NWC**, **FT**, **MC** and **MOMENTUM**).
+    # Those markers are presentation only; removing them makes channel parsers
+    # see the same semantic text the user sees in Discord.
+    return value.replace("**", "").replace("__", "").replace("`", "")
+
+
 def _normalize_line(value: str) -> str:
     value = _strip_format_chars(str(value))
+    value = _strip_discord_markdown(value)
     return " ".join(value.split()).strip()
 
 
