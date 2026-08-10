@@ -6,6 +6,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from .market_data import MarketDataStore
+
 
 OUTCOME_OPTIONS = [
     "NOT LABELED",
@@ -32,10 +34,19 @@ def _parse_time(value: str) -> datetime | None:
         return None
 
 
+def _decode_json(value: Any, fallback: Any) -> Any:
+    try:
+        decoded = json.loads(value or "")
+        return decoded
+    except (json.JSONDecodeError, TypeError):
+        return fallback
+
+
 class ReviewOutcomeStore:
     def __init__(self, database_path: str | Path) -> None:
         self.database_path = Path(database_path)
         self.database_path.parent.mkdir(parents=True, exist_ok=True)
+        self.market_store = MarketDataStore(self.database_path)
         self._initialize()
 
     def _connect(self) -> sqlite3.Connection:
@@ -56,10 +67,32 @@ class ReviewOutcomeStore:
                     notes TEXT NOT NULL DEFAULT '',
                     followup_event_count INTEGER NOT NULL DEFAULT 0,
                     followup_channel_count INTEGER NOT NULL DEFAULT 0,
-                    followup_channels_json TEXT NOT NULL DEFAULT '[]'
+                    followup_channels_json TEXT NOT NULL DEFAULT '[]',
+                    market_metrics_json TEXT NOT NULL DEFAULT '{}',
+                    market_reference_price REAL,
+                    market_return_pct REAL,
+                    market_mfe_pct REAL,
+                    market_mae_pct REAL,
+                    market_sample_count INTEGER NOT NULL DEFAULT 0
                 )
                 """
             )
+            columns = {
+                row[1] for row in connection.execute("PRAGMA table_info(ai_review_outcomes)")
+            }
+            migrations = {
+                "market_metrics_json": "TEXT NOT NULL DEFAULT '{}'",
+                "market_reference_price": "REAL",
+                "market_return_pct": "REAL",
+                "market_mfe_pct": "REAL",
+                "market_mae_pct": "REAL",
+                "market_sample_count": "INTEGER NOT NULL DEFAULT 0",
+            }
+            for column, definition in migrations.items():
+                if column not in columns:
+                    connection.execute(
+                        f"ALTER TABLE ai_review_outcomes ADD COLUMN {column} {definition}"
+                    )
             connection.execute(
                 "CREATE INDEX IF NOT EXISTS idx_ai_review_outcomes_ticker ON ai_review_outcomes(ticker, labeled_at DESC)"
             )
@@ -78,10 +111,7 @@ class ReviewOutcomeStore:
             ).fetchone()
         if row is None:
             return None
-        try:
-            result = json.loads(row["result_json"] or "{}")
-        except json.JSONDecodeError:
-            result = {}
+        result = _decode_json(row["result_json"], {})
         return {
             "id": int(row["id"]),
             "ticker": row["ticker"],
@@ -126,10 +156,7 @@ class ReviewOutcomeStore:
                 ).total_seconds()
             if delta <= 0 or delta > horizon_seconds:
                 continue
-            try:
-                data = json.loads(row["data_json"] or "{}")
-            except json.JSONDecodeError:
-                data = {}
+            data = _decode_json(row["data_json"], {})
             events.append(
                 {
                     "received_at": row["received_at"],
@@ -152,6 +179,19 @@ class ReviewOutcomeStore:
             "events": events,
         }
 
+    def market_summary(
+        self,
+        *,
+        ticker: str,
+        review_created_at: str,
+        horizon_minutes: int = 30,
+    ) -> dict[str, Any]:
+        return self.market_store.review_metrics(
+            ticker=ticker,
+            review_created_at=review_created_at,
+            horizon_minutes=horizon_minutes,
+        )
+
     def save_outcome(
         self,
         *,
@@ -161,15 +201,19 @@ class ReviewOutcomeStore:
         outcome: str,
         notes: str,
         followup: dict[str, Any],
+        market_metrics: dict[str, Any] | None = None,
     ) -> None:
         labeled_at = datetime.now(timezone.utc).astimezone().isoformat(timespec="seconds")
+        market = market_metrics if isinstance(market_metrics, dict) else {}
         with self._connect() as connection:
             connection.execute(
                 """
                 INSERT INTO ai_review_outcomes (
                     review_id, ticker, labeled_at, horizon_minutes, outcome, notes,
-                    followup_event_count, followup_channel_count, followup_channels_json
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    followup_event_count, followup_channel_count, followup_channels_json,
+                    market_metrics_json, market_reference_price, market_return_pct,
+                    market_mfe_pct, market_mae_pct, market_sample_count
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(review_id) DO UPDATE SET
                     labeled_at=excluded.labeled_at,
                     horizon_minutes=excluded.horizon_minutes,
@@ -177,7 +221,13 @@ class ReviewOutcomeStore:
                     notes=excluded.notes,
                     followup_event_count=excluded.followup_event_count,
                     followup_channel_count=excluded.followup_channel_count,
-                    followup_channels_json=excluded.followup_channels_json
+                    followup_channels_json=excluded.followup_channels_json,
+                    market_metrics_json=excluded.market_metrics_json,
+                    market_reference_price=excluded.market_reference_price,
+                    market_return_pct=excluded.market_return_pct,
+                    market_mfe_pct=excluded.market_mfe_pct,
+                    market_mae_pct=excluded.market_mae_pct,
+                    market_sample_count=excluded.market_sample_count
                 """,
                 (
                     int(review_id),
@@ -189,6 +239,12 @@ class ReviewOutcomeStore:
                     int(followup.get("event_count") or 0),
                     int(followup.get("channel_count") or 0),
                     json.dumps(followup.get("channels") or [], ensure_ascii=False),
+                    json.dumps(market, ensure_ascii=False, sort_keys=True),
+                    market.get("reference_price"),
+                    market.get("return_pct"),
+                    market.get("mfe_pct"),
+                    market.get("mae_pct"),
+                    int(market.get("sample_count") or 0),
                 ),
             )
 
@@ -197,7 +253,9 @@ class ReviewOutcomeStore:
             row = connection.execute(
                 """
                 SELECT review_id, ticker, labeled_at, horizon_minutes, outcome, notes,
-                       followup_event_count, followup_channel_count, followup_channels_json
+                       followup_event_count, followup_channel_count, followup_channels_json,
+                       market_metrics_json, market_reference_price, market_return_pct,
+                       market_mfe_pct, market_mae_pct, market_sample_count
                 FROM ai_review_outcomes
                 WHERE review_id = ?
                 """,
@@ -205,10 +263,8 @@ class ReviewOutcomeStore:
             ).fetchone()
         if row is None:
             return None
-        try:
-            channels = json.loads(row["followup_channels_json"] or "[]")
-        except json.JSONDecodeError:
-            channels = []
+        channels = _decode_json(row["followup_channels_json"], [])
+        market_metrics = _decode_json(row["market_metrics_json"], {})
         return {
             "review_id": int(row["review_id"]),
             "ticker": row["ticker"],
@@ -219,6 +275,12 @@ class ReviewOutcomeStore:
             "followup_event_count": int(row["followup_event_count"]),
             "followup_channel_count": int(row["followup_channel_count"]),
             "followup_channels": channels if isinstance(channels, list) else [],
+            "market_metrics": market_metrics if isinstance(market_metrics, dict) else {},
+            "market_reference_price": row["market_reference_price"],
+            "market_return_pct": row["market_return_pct"],
+            "market_mfe_pct": row["market_mfe_pct"],
+            "market_mae_pct": row["market_mae_pct"],
+            "market_sample_count": int(row["market_sample_count"] or 0),
         }
 
     def list_reviews(self, limit: int = 100) -> list[dict[str, Any]]:
@@ -228,7 +290,9 @@ class ReviewOutcomeStore:
                 SELECT r.id, r.ticker, r.created_at, r.model, r.result_json,
                        o.outcome, o.horizon_minutes, o.notes,
                        o.followup_event_count, o.followup_channel_count,
-                       o.followup_channels_json
+                       o.followup_channels_json, o.market_metrics_json,
+                       o.market_reference_price, o.market_return_pct,
+                       o.market_mfe_pct, o.market_mae_pct, o.market_sample_count
                 FROM ai_reviews r
                 LEFT JOIN ai_review_outcomes o ON o.review_id = r.id
                 ORDER BY r.created_at DESC, r.id DESC
@@ -239,10 +303,8 @@ class ReviewOutcomeStore:
 
         result: list[dict[str, Any]] = []
         for row in rows:
-            try:
-                review = json.loads(row["result_json"] or "{}")
-            except json.JSONDecodeError:
-                review = {}
+            review = _decode_json(row["result_json"], {})
+            market_metrics = _decode_json(row["market_metrics_json"], {})
             result.append(
                 {
                     "id": int(row["id"]),
@@ -255,6 +317,12 @@ class ReviewOutcomeStore:
                     "notes": row["notes"] or "",
                     "followup_event_count": int(row["followup_event_count"] or 0),
                     "followup_channel_count": int(row["followup_channel_count"] or 0),
+                    "market_metrics": market_metrics if isinstance(market_metrics, dict) else {},
+                    "market_reference_price": row["market_reference_price"],
+                    "market_return_pct": row["market_return_pct"],
+                    "market_mfe_pct": row["market_mfe_pct"],
+                    "market_mae_pct": row["market_mae_pct"],
+                    "market_sample_count": int(row["market_sample_count"] or 0),
                 }
             )
         return result
