@@ -10,7 +10,7 @@ from zoneinfo import ZoneInfo
 from .trade_plan_calibration_v3 import MAX_ACTIONABLE_OBSERVED_SPREAD_PCT
 
 
-PIPELINE_VERSION = 2
+PIPELINE_VERSION = 3
 NEW_YORK = ZoneInfo("America/New_York")
 
 
@@ -162,8 +162,15 @@ class LivePipelineStore:
         session_id: int,
         *,
         strategy_id: str | None = None,
+        setup_instance_key: str | None = None,
         limit: int = 500,
     ) -> dict[str, Any] | None:
+        """Return an existing plan for a strategy or one concrete setup instance.
+
+        Version 3 can distinguish a later re-break/reclaim from an earlier WATCH
+        on the same strategy. Legacy plans without instance keys still fall back
+        to strategy-level matching when no instance key is requested.
+        """
         try:
             with self._connect() as connection:
                 rows = connection.execute(
@@ -178,6 +185,7 @@ class LivePipelineStore:
         except sqlite3.OperationalError:
             return None
         requested_strategy = str(strategy_id or "").strip()
+        requested_instance = str(setup_instance_key or "").strip()
         for row in rows:
             item = dict(row)
             try:
@@ -191,10 +199,15 @@ class LivePipelineStore:
                 continue
             if stored_session != int(session_id):
                 continue
-            if requested_strategy:
-                primary = ((snapshot.get("strategy_context") or {}).get("primary") or {})
-                if str(primary.get("strategy_id") or "").strip() != requested_strategy:
+
+            primary = ((snapshot.get("strategy_context") or {}).get("primary") or {})
+            if requested_strategy and str(primary.get("strategy_id") or "").strip() != requested_strategy:
+                continue
+            if requested_instance:
+                stored_instance = str(primary.get("instance_key") or "").strip()
+                if stored_instance != requested_instance:
                     continue
+
             try:
                 result = json.loads(item.get("result_json") or "{}")
             except json.JSONDecodeError:
@@ -213,13 +226,7 @@ def final_trade_alert_gate(
     strategy_validation: dict[str, Any] | None = None,
     now: datetime | None = None,
 ) -> dict[str, Any]:
-    """Deterministic blockers that AI cannot override before a user-facing alert.
-
-    A recognized known setup is now the primary strategy requirement. Historical
-    calibration is a validator/filter: mature negative evidence vetoes an alert,
-    while immature history does not force the system to rediscover the setup from
-    scratch before it can be evaluated.
-    """
+    """Deterministic blockers that AI cannot override before a user-facing alert."""
     blockers: list[str] = []
     session = regular_session_state(now)
     if not session["open"]:
@@ -312,6 +319,7 @@ def final_trade_alert_gate(
         "spread_guardrail_pct": MAX_ACTIONABLE_OBSERVED_SPREAD_PCT,
         "strategy_id": primary.get("strategy_id"),
         "strategy_name": primary.get("name"),
+        "setup_instance_key": primary.get("instance_key"),
         "strategy_validation_status": validation.get("status"),
         "detection_calibration_status": qualification.get("status"),
     }
