@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -9,6 +10,7 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QHeaderView,
     QLabel,
+    QPlainTextEdit,
     QPushButton,
     QTableWidget,
     QTableWidgetItem,
@@ -41,6 +43,17 @@ def _duration(value: Any) -> str:
     return f"{milliseconds / 1000.0:.1f} s"
 
 
+def _pretty_response(value: Any) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    try:
+        parsed = json.loads(text)
+    except (json.JSONDecodeError, TypeError):
+        return text
+    return json.dumps(parsed, ensure_ascii=False, indent=2)
+
+
 class ApiCallsPage(QWidget):
     """Small persistent audit page for automatic OpenAI requests."""
 
@@ -57,7 +70,7 @@ class ApiCallsPage(QWidget):
         title = QLabel("API Calls")
         title.setObjectName("pageTitle")
         subtitle = QLabel(
-            "Tracks automatic OpenAI Trade Plan requests so you can see exactly when TrendVisionAI became interested enough in a stock to ask the model for a chart/setup decision."
+            "Tracks automatic OpenAI Trade Plan requests so you can see exactly when TrendVisionAI became interested enough in a stock to ask the model for a chart/setup decision. Select a call to inspect Terra's structured answer."
         )
         subtitle.setObjectName("muted")
         subtitle.setWordWrap(True)
@@ -104,7 +117,7 @@ class ApiCallsPage(QWidget):
         header.setSectionResizeMode(2, QHeaderView.ResizeToContents)
         header.setSectionResizeMode(4, QHeaderView.Stretch)
         self.table.itemSelectionChanged.connect(self._show_details)
-        root.addWidget(self.table, 1)
+        root.addWidget(self.table, 2)
 
         actions = QHBoxLayout()
         actions.addStretch()
@@ -121,8 +134,20 @@ class ApiCallsPage(QWidget):
         self.details.setWordWrap(True)
         root.addWidget(self.details)
 
+        response_title = QLabel("Terra response (exact structured output)")
+        response_title.setStyleSheet("font-size: 11pt; font-weight: 600;")
+        root.addWidget(response_title)
+
+        self.response_view = QPlainTextEdit()
+        self.response_view.setReadOnly(True)
+        self.response_view.setMinimumHeight(220)
+        self.response_view.setPlaceholderText(
+            "Select an API call above to see Terra's answer."
+        )
+        root.addWidget(self.response_view, 1)
+
         note = QLabel(
-            "This journal stores request metadata only (time, ticker, model, strategy, status and duration). It does not store your OpenAI API key or duplicate the full prompt/chart payload."
+            "The journal stores request metadata plus Terra's returned structured answer. It does not store your OpenAI API key, the full prompt, or chart image bytes. Calls made before this response-logging update may not have an answer saved."
         )
         note.setObjectName("muted")
         note.setWordWrap(True)
@@ -133,6 +158,7 @@ class ApiCallsPage(QWidget):
     def _show_details(self) -> None:
         row = self.table.currentRow()
         if row < 0 or row >= len(self._rows):
+            self.response_view.clear()
             return
         item = self._rows[row]
         strategy = item.get("strategy_name") or item.get("strategy_id") or "-"
@@ -148,6 +174,20 @@ class ApiCallsPage(QWidget):
         if error:
             message += f" Error: {error}"
         self.details.setText(message)
+
+        response_text = _pretty_response(item.get("response_text"))
+        if response_text:
+            self.response_view.setPlainText(response_text)
+        elif str(item.get("status") or "") == "IN PROGRESS":
+            self.response_view.setPlainText("Terra is still processing this request.")
+        elif str(item.get("status") or "") == "FAILED":
+            self.response_view.setPlainText(
+                "No Terra response body was available for this failed request. See the error above."
+            )
+        else:
+            self.response_view.setPlainText(
+                "No Terra response was stored for this call. Calls made before the response-logging update only contain metadata."
+            )
 
     def refresh(self, *, force: bool = False) -> None:
         revision = self.store.revision()
@@ -206,6 +246,8 @@ class ApiCallsPage(QWidget):
         self._render_revision = revision
         if rows:
             self._show_details()
+        else:
+            self.response_view.clear()
 
 
 PreviousMainWindow = base.MainWindow
