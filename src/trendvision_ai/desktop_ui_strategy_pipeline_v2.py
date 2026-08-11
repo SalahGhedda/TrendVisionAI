@@ -3,6 +3,7 @@ from __future__ import annotations
 import time
 
 from . import desktop_ui_strategy_pipeline as strategy
+from .desktop_ui_calibration_validator import CalibrationValidatorPage
 
 
 base = strategy.base
@@ -14,6 +15,18 @@ class StrategyPipelineMainWindowV2(strategy.StrategyPipelineMainWindow):
     def __init__(self) -> None:
         self._last_live_evidence_refresh = 0.0
         super().__init__()
+
+        old_page = self.qualification_page
+        old_index = self.stack.indexOf(old_page)
+        self.stack.removeWidget(old_page)
+        self.qualification_page = CalibrationValidatorPage(self.repo, base.MetricCard)
+        self.qualification_page.ticker_requested.connect(self.open_ticker)
+        self.stack.insertWidget(old_index, self.qualification_page)
+        old_page.deleteLater()
+        for button in self.nav_buttons:
+            if button.text() == "Candidate Qualification":
+                button.setText("Calibration Validator")
+                break
 
     def _run_live_pipeline(self) -> None:
         now = time.monotonic()
