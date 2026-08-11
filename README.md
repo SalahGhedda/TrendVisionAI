@@ -1,14 +1,38 @@
 # TrendVisionAI
 
-TrendVisionAI is a local Windows decision-support dashboard that captures TrendVision Discord scanner notifications, builds per-ticker memory, tracks HIGH ATTENTION cases with Alpaca market data, evaluates trade plans, and calibrates what actually happened afterward.
+TrendVisionAI is a local Windows decision-support dashboard that captures TrendVision Discord scanner notifications, builds per-ticker memory, tracks HIGH ATTENTION cases with Alpaca market data, recognizes configured intraday setups, evaluates trade plans, and calibrates what happened afterward.
 
 ## Product goal
 
-The practical end product is a **human-executed trade alert**. When the system has enough evidence and the current setup passes all live checks, TrendVisionAI should alert the user with a candidate, entry zone, stop loss, targets, risk/reward and the evidence behind the alert. The application does **not** place brokerage orders.
+The practical end product is a **human-executed trade alert**. TrendVisionAI can surface a candidate with an entry zone, stop loss, targets, risk/reward, recognized setup and supporting/risk evidence. The application does **not** place brokerage orders.
 
 The system learns **setup conditions across many tickers**, not whether one particular stock symbol was historically good.
 
-## Current workflow
+## Strategy architecture
+
+TrendVisionAI no longer asks its own small dataset to invent the trading strategy from scratch.
+
+```text
+Known Strategy Library
+        +
+TrendVision scanner evidence
+        +
+Current Alpaca market/chart context
+        ↓
+Recognized setup instance
+        ↓
+AI Trade Plan inside that setup framework
+        ↓
+Historical TrendVisionAI calibration validates / filters it
+        ↓
+Deterministic hard alert gate
+        ↓
+🚨 Manual-decision Trade Alert
+```
+
+Historical calibration remains useful, but its role is now **validator/filter**, not strategy inventor. Immature history alone does not erase a recognized setup. Mature negative strategy/condition evidence can veto a final alert.
+
+## Current automatic workflow
 
 ```text
 TrendVision Discord alerts
@@ -19,40 +43,41 @@ HIGH ATTENTION
         ↓
 Read-only Alpaca tracking
         ↓
-Automatic market outcomes + Calibration Statistics
+Strategy Library scans current regular-session 1-minute bars
         ↓
-Trade Plan v3 experiments
-        ↓
-Objective Entry / Stop / T1 / T2 follow-up
-        ↓
-Trade Plan Statistics
-        ↓
-Candidate Qualification
-        ↓
-Automatic live pipeline
+NO VALID SETUP → wait and scan again later
+        │
+        └── Known setup recognized
+                 ↓
+        Automatic neutral chart context
+                 ↓
+        Automatic Trade Plan v3
+                 ↓
+        Calibration Validator
+                 ↓
+        Deterministic hard alert gate
+                 ↓
+        🚨 Windows/dashboard Trade Alert
+                 ↓
+        User manually decides whether to trade
 ```
 
-During regular US market hours, the automatic live pipeline can now run:
+No OpenAI Trade Plan request is used when no configured strategy setup is recognized.
 
-```text
-HIGH ATTENTION
-      ↓
-Automatic qualification check
-      ↓
-Automatic Alpaca 1-minute chart context
-      ↓
-Automatic Trade Plan v3
-      ↓
-POTENTIAL TRADE?
-      ↓
-Deterministic hard alert gate
-      ↓
-🚨 Windows/dashboard Trade Alert
-      ↓
-User manually decides whether to trade
-```
+## Strategy Library v1
 
-Before qualification evidence is mature, the same automatic chart + Trade Plan path can run in **calibration-only mode** so the dataset continues growing without generating a user-facing trade alert.
+The Strategy Library currently contains transparent deterministic implementations of these common intraday setup families:
+
+- **5-Min Opening Range Breakout (`ORB_5M`)**
+- **15-Min Opening Range Breakout (`ORB_15M`)**
+- **Breakout + Retest (`BREAKOUT_RETEST`)**
+- **High-of-Day Breakout (`HOD_BREAKOUT`)**
+- **First Pullback After Momentum (`FIRST_PULLBACK`)**
+- **Session VWAP Reclaim + Hold (`VWAP_RECLAIM_HOLD`)**
+
+These implementations are explicit TrendVisionAI rules, not claims that any strategy is universally profitable. Examples of the deterministic checks include fresh level breaks, controlled retests, anti-chase extension limits, same-feed relative bar-volume comparisons, pullback retracement structure and a session cumulative VWAP calculated from the supplied Alpaca bars.
+
+The Strategy Library page shows the configured setups and recent recognized instances.
 
 ## Setup / launch
 
@@ -61,7 +86,7 @@ scripts\setup.bat
 scripts\run_ui.bat
 ```
 
-The UI starts its Windows notification listener, read-only market tracker and live pipeline automatically.
+The UI starts its Windows notification listener, read-only market tracker and strategy-aware live pipeline automatically.
 
 ## Main capabilities
 
@@ -72,82 +97,64 @@ The UI starts its Windows notification listener, read-only market tracker and li
 - Manual AI Candidate Review v3.
 - Alpaca read-only tracking for HIGH ATTENTION cases.
 - Automatic 15m / 30m / 60m / 4h market-path outcomes.
-- Detection-time Calibration Statistics by scanner combination, signal, RV, extension, market cap and risk conditions.
+- Detection-time Calibration Statistics.
 - Manual screenshot-enhanced Trade Plan v3.
-- Experimental Entry / Stop / T1 / T2 persistence and objective follow-up.
-- Trade Plan Statistics grouped by detection-time conditions and plan characteristics.
-- Candidate Qualification v1 that remains evidence-locked until enough resolved plan history exists.
-- Automatic recent Alpaca 1-minute chart acquisition/rendering for live calibration and qualified candidates.
-- Automatic Trade Plan v3 execution for new HIGH ATTENTION tracking sessions during regular hours.
-- Qualified-candidate Windows notifications with persistent deduplication.
-- Final deterministic alert gate and Windows/dashboard trade alerts when a qualified POTENTIAL TRADE passes all blockers.
+- Entry / Stop / T1 / T2 persistence and objective follow-up.
+- Trade Plan Statistics grouped by detection conditions, plan characteristics and recognized strategy.
+- Known Strategy Library recognition before automatic OpenAI Trade Plan requests.
+- Full current regular-session 1-minute bars for opening-range/session-VWAP recognition.
+- Automatic neutral Alpaca chart rendering.
+- Strategy-aware automatic Trade Plan v3.
+- Calibration Validator that can support, remain immature/neutral, or veto a setup.
+- Persistent strategy/plan/alert deduplication.
+- Deterministic final alert blockers.
+- Windows/dashboard Entry / Stop / T1 / T2 trade alert path.
 
 ## Trade Plan v3
 
-Ticker Memory still lets the user paste or choose a current chart screenshot manually. OpenAI receives the underlying chart image plus stored TrendVision evidence and current usable Alpaca context.
+Trade Plan v3 still enforces its market-data correctness guardrails:
 
-Trade Plan v3 specifically:
-
-- checks the age of the actual Alpaca trade, quote and minute-bar events separately from the API-poll timestamp;
+- checks actual Alpaca trade/quote/bar event timestamps separately from poll time;
 - does not treat a freshly downloaded snapshot as proof that its latest trade is current;
 - treats `IEX` as partial-venue data, not consolidated SIP/NBBO;
 - treats legacy `zero_borrow=false` as UNKNOWN unless an explicit 0-borrow observation exists;
-- ignores BUY / SELL / ENTRY / SL / TP recommendations printed by another tool inside a manual screenshot;
+- ignores third-party BUY / SELL / ENTRY / SL / TP recommendations inside manual screenshots;
 - does not directly compare differently defined TrendVision RV/volume with Alpaca IEX volume;
-- blocks actionable plans when current market context is stale or otherwise unusable;
-- blocks a fresh observed spread of 15%+ from producing `POTENTIAL TRADE` levels;
-- keeps deterministic long-side coherence checks for Entry / Stop / T1 / T2.
+- blocks actionable plans when current market context is stale/unusable;
+- blocks a fresh observed spread of 15%+ from actionable levels;
+- keeps deterministic Entry / Stop / T1 / T2 coherence checks.
 
-## Automatic chart context
+In automatic Strategy Library mode, the AI is additionally instructed **not to invent or switch to another setup**. It must evaluate the deterministic primary strategy and anchor its plan to that setup's structural key levels. A second deterministic anti-chase guard can downgrade a proposed plan if its entry is too far above the strategy reference.
 
-For the live pipeline, TrendVisionAI requests recent Alpaca **1-minute bars** for the ticker and renders its own neutral candlestick/volume image under `data/auto_trade_charts/`.
+## Automatic chart / bar context
 
-The generated chart:
+For strategy recognition, TrendVisionAI requests the current day's regular-session Alpaca **1-minute bars from 09:30 New York time through now**. This allows the app to inspect opening ranges and calculate same-feed cumulative session VWAP.
 
-- contains no BUY / SELL / SL / TP recommendations;
-- is paired with the same structured bar list sent to the model;
-- is used for trend, candle, wick, pullback, consolidation and support/resistance structure;
-- inherits the limitations of the configured Alpaca feed. With the default free `IEX` feed it remains partial-venue evidence.
+For AI chart vision, TrendVisionAI renders a bounded recent portion of those bars as a neutral candlestick/volume image under:
 
-Exact current planning price/quote still comes from fresh Trade Plan v3 market context rather than from pixels in the generated chart.
+```text
+data\auto_trade_charts\...
+```
 
-## Calibration Statistics
+The generated chart contains no BUY / SELL / SL / TP recommendations and inherits the configured Alpaca feed's limitations. With the default free `IEX` feed it remains partial-venue evidence.
 
-For each HIGH ATTENTION tracking session, TrendVisionAI freezes a 30-minute pre-trigger feature snapshot so future scanner events cannot leak into the detection-time evidence.
+Exact current planning price/quote still comes from fresh Trade Plan v3 market context rather than from chart pixels.
 
-Examples include:
+## Calibration and Trade Plan Statistics
 
-- attention score bucket;
-- scanner count and exact channel combination;
-- BREAKOUT / MOMENTUM and other explicit signals;
-- relative-volume bucket;
-- extension bucket;
-- market-cap bucket when available;
-- zero-borrow observation;
-- whale direction;
-- pre-trigger halt observation;
-- compound conditions such as `BREAKOUT + RV>=10x`.
+TrendVisionAI continues collecting outcomes because the goal is to learn **how the known strategies behave specifically on the volatile stocks and scanner conditions TrendVision surfaces**.
 
-The page compares those conditions with objective 15m / 30m / 60m / 4h outcomes.
+Trade Plan Statistics can group actionable plan outcomes by items including:
 
-## Trade Plan Statistics
+- `STRATEGY: ORB_5M`
+- `STRATEGY: BREAKOUT_RETEST`
+- strategy family;
+- strategy recognition score bucket;
+- scanner signal / channel combination;
+- RV / extension buckets;
+- chart/risk/confidence characteristics.
 
-The **Trade Plan Statistics** page measures the actual experimental plans rather than only asking whether the stock moved up after HIGH ATTENTION.
-
-For each pattern it shows:
-
-- actionable plan count;
-- entry-observed count;
-- resolved post-entry count;
-- entry-reached rate;
-- T1-reached rate;
-- T2-reached rate;
-- stop-first rate;
-- median post-entry MFE;
-- median post-entry MAE;
-- sample-maturity label.
-
-T1/T2/stop rates use resolved post-entry cases. Open plans are excluded from those denominators.
+For each group it tracks entry-observed count, resolved post-entry count, T1/T2 rates, stop-first rate and median post-entry MFE/MAE.
 
 Sample maturity remains:
 
@@ -158,49 +165,54 @@ Sample maturity remains:
 
 These are evidence-maturity labels, not guaranteed win rates, statistical proof or expected profit.
 
-## Candidate Qualification v1
+## Calibration Validator v2
 
-Candidate Qualification matches a current HIGH ATTENTION ticker's frozen detection-time conditions against resolved Trade Plan history and returns one of:
+The old Candidate Qualification concept is now presented as **Calibration Validator**.
+
+Detection-condition history can report:
 
 - `INSUFFICIENT EVIDENCE`
 - `MONITOR`
 - `MONITOR / RISK`
-- `EXPERIMENTALLY QUALIFIED`
+- `EXPERIMENTALLY SUPPORTED`
 
-Current transparent readiness gates:
+Strategy-specific history can report:
 
-- at least **30 resolved entered Trade Plan cases globally** before qualification is enabled;
-- at least **15 resolved cases** for a matched pattern before that pattern is mature enough to vote;
-- an experimentally positive pattern currently requires T1 reached in at least 60% of resolved cases and stop-first no more than 30%;
-- an experimentally negative pattern is flagged when T1 is 30% or lower or stop-first is 50% or higher;
-- at least two **specific** mature positive matched patterns are required, with no mature specific negative match, before a ticker becomes `EXPERIMENTALLY QUALIFIED`;
-- generic `ALL HIGH ATTENTION` evidence does not count as one of those positive patterns.
+- `CALIBRATION IMMATURE`
+- `MATURE POSITIVE`
+- `MATURE NEUTRAL`
+- `MATURE NEGATIVE`
 
-These thresholds are an initial transparent calibration framework, not claims that the values are statistically optimal.
+Current transparent maturity/classification thresholds are still intentionally conservative:
 
-## Live Trade Pipeline
+- 15 resolved cases before a pattern/strategy-specific row becomes mature enough to vote;
+- positive: T1 reached at least 60% and stop-first no more than 30%;
+- negative: T1 reached 30% or less, or stop-first at least 50%.
 
-The **Live Trade Pipeline** page records the automatic workflow and its deduplicated events.
+These thresholds are initial calibration logic, not claims that they are statistically optimal.
 
-A HIGH ATTENTION session can receive one automatic calibration Trade Plan during the configured regular session when fresh Alpaca context and credentials are available. This helps the Trade Plan dataset grow even while Candidate Qualification is still evidence-locked.
+**Important change:** fewer than 30 global resolved cases no longer blocks a recognized known setup by itself. Immature history simply means the validator does not yet have a mature vote. Mature negative evidence can veto the final alert.
 
-When a ticker is `EXPERIMENTALLY QUALIFIED`, TrendVisionAI also records/notifies the qualified candidate. If its automatic Trade Plan returns `POTENTIAL TRADE`, the final alert gate requires all of the following before a trade alert can be emitted:
+## Final alert gate
+
+A final Trade Alert requires all of the following:
 
 - regular US equity session (configured 09:30-16:00 America/New_York);
-- historical status = `EXPERIMENTALLY QUALIFIED`;
+- recognized Strategy Library setup with `CANDIDATE` status;
 - Trade Plan decision = `POTENTIAL TRADE`;
 - fresh usable market context;
-- a fresh quote;
+- fresh quote;
 - known observed spread below the configured 15% guardrail;
 - coherent Entry / Stop / T1 / T2;
+- proposed entry not beyond the strategy's deterministic anti-chase limit;
 - no `EXTREME` plan risk;
 - chart structure not `DANGEROUS` / `UNCLEAR`;
 - no multiple recent halt observations;
-- no previous final alert for the same tracking session.
+- no mature negative strategy-specific calibration;
+- no mature negative detection-condition calibration veto;
+- persistent duplicate protection.
 
-The local clock gate is intentionally simple; stale/unusable market data remains an independent blocker when the exchange is not actually producing current data.
-
-A final notification contains Entry, Stop, T1 and T2 and is explicitly for **manual user decision/execution only**.
+A final notification is explicitly for **manual user decision/execution only**.
 
 ## UI screens
 
@@ -213,7 +225,8 @@ A final notification contains Entry, Stop, T1 and T2 and is explicitly for **man
 - Calibration Statistics
 - Trade Plan Experiments
 - Trade Plan Statistics
-- Candidate Qualification
+- Calibration Validator
+- Strategy Library
 - Live Trade Pipeline
 
 ## Storage
@@ -252,25 +265,23 @@ Important SQLite layers include:
 - [x] Desktop dashboard
 - [x] AI Candidate Review v3
 - [x] Alpaca read-only HIGH ATTENTION tracking
-- [x] Objective 15m / 30m / 60m / 4h outcomes
-- [x] Calibration Statistics
-- [x] Manual chart screenshot input
-- [x] Trade Plan v3
-- [x] Persist Entry / Stop / T1 / T2 experiments
-- [x] Objective post-plan evaluation
+- [x] Objective outcome calibration
+- [x] Trade Plan v3 + objective Entry / Stop / T1 / T2 follow-up
 - [x] Trade Plan Statistics
-- [x] Candidate Qualification v1 framework / readiness gate
-- [x] Automatic qualification checks in the live pipeline
-- [x] Qualified-candidate notification + persistent deduplication
-- [x] Automatic Alpaca 1-minute chart context
-- [x] Automatic Trade Plan stage
-- [x] Deterministic final alert blockers
-- [x] Windows/dashboard Entry / Stop / T1 / T2 trade alert path
-- [ ] Collect enough real trade-plan cases for mature pattern evidence
-- [ ] Tune/freeze qualification rules from accumulated evidence
-- [ ] Validate frozen alert rules on new out-of-sample cases
+- [x] Automatic live chart / Trade Plan pipeline
+- [x] Deterministic final alert blockers + Windows/dashboard alert path
+- [x] Known Strategy Library v1
+- [x] ORB / breakout-retest / HOD / first-pullback / session-VWAP setup recognition
+- [x] Strategy-aware automatic Trade Plan instructions and anti-chase guardrails
+- [x] Calibration changed from strategy inventor to validator/filter
+- [x] Strategy-specific Trade Plan statistics tags
+- [x] Strategy Library and Calibration Validator UI
+- [ ] Run/observe the new strategy pipeline during regular market hours and fix real-world edge cases
+- [ ] Accumulate strategy-specific cases
+- [ ] Tune/freeze strategy thresholds and calibration veto rules from real evidence
+- [ ] Validate frozen rules on new out-of-sample cases
 - [ ] User manually decides and executes trades
 
 ## Safety / interpretation
 
-TrendVisionAI is an experimental decision-support and calibration application. Attention tiers, AI reviews, chart interpretations, statistical patterns, qualification labels and trade-plan levels do not guarantee profitability. No brokerage order is placed by the application.
+TrendVisionAI is an experimental decision-support and calibration application. A recognized strategy, AI review, historical statistic, qualification label or trade-plan level does not guarantee profitability. No brokerage order is placed by the application.
