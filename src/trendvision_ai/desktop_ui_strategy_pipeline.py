@@ -24,14 +24,14 @@ from .auto_chart import AUTO_CHART_LIMIT, AlpacaRecentBarsClient, render_candles
 from .automatic_trade_plan import AUTO_PLAN_SOURCE, analyze_automatic_trade_plan
 from .live_pipeline import LivePipelineStore, final_trade_alert_gate, qualification_summary, regular_session_state
 from .market_data import get_alpaca_credentials
-from .strategy_library import detect_known_setups, strategy_catalog
+from .strategy_library_v2 import detect_known_setups, strategy_catalog
 from .trade_plan_calibration_v3 import build_trade_plan_snapshot_v3
 from .trade_plans import TradePlanResult
 
 
 base = live.base
-STRATEGY_SCAN_COOLDOWN_SECONDS = 45.0
-MAX_AUTO_STRATEGIES_PER_SESSION = 3
+STRATEGY_SCAN_COOLDOWN_SECONDS = 30.0
+MAX_AUTO_STRATEGIES_PER_SESSION = 8
 
 
 class StrategyTradePlanWorker(QThread):
@@ -72,8 +72,8 @@ class StrategyTradePlanWorker(QThread):
                 self.alpaca_secret,
                 feed=self.feed,
             )
-            session_bars = client.fetch_session_bars(self.ticker)
-            strategy_context = detect_known_setups(session_bars)
+            momentum_bars = client.fetch_momentum_bars(self.ticker)
+            strategy_context = detect_known_setups(momentum_bars)
             if not strategy_context.get("recognized"):
                 self.no_setup.emit(strategy_context)
                 return
@@ -81,14 +81,14 @@ class StrategyTradePlanWorker(QThread):
             store = LivePipelineStore(self.database_path)
             auto_events = [
                 event
-                for event in store.list_events(limit=500)
+                for event in store.list_events(limit=1000)
                 if int(event.get("session_id") or 0) == self.session_id
                 and event.get("stage") == "AUTO_PLAN"
             ]
             if len(auto_events) >= MAX_AUTO_STRATEGIES_PER_SESSION:
                 self.duplicate.emit(
                     {
-                        "reason": f"Automatic strategy-plan cap reached ({MAX_AUTO_STRATEGIES_PER_SESSION} per tracking session).",
+                        "reason": f"Automatic setup-instance plan cap reached ({MAX_AUTO_STRATEGIES_PER_SESSION} per tracking session).",
                         "strategy_context": strategy_context,
                     }
                 )
@@ -97,11 +97,13 @@ class StrategyTradePlanWorker(QThread):
             selected = None
             for match in strategy_context.get("matches") or []:
                 strategy_id = str(match.get("strategy_id") or "").strip()
+                instance_key = str(match.get("instance_key") or strategy_id).strip()
                 if not strategy_id:
                     continue
                 existing = store.existing_trade_plan_for_session(
                     self.session_id,
                     strategy_id=strategy_id,
+                    setup_instance_key=instance_key,
                 )
                 if existing is None:
                     selected = match
@@ -109,7 +111,7 @@ class StrategyTradePlanWorker(QThread):
             if selected is None:
                 self.duplicate.emit(
                     {
-                        "reason": "All currently recognized strategy setups for this session have already received an automatic Trade Plan.",
+                        "reason": "All currently recognized setup instances for this session have already received an automatic Trade Plan. A materially new break/retest/reclaim can be analyzed later.",
                         "strategy_context": strategy_context,
                     }
                 )
@@ -120,11 +122,11 @@ class StrategyTradePlanWorker(QThread):
             strategy_context["recognized"] = True
             strategy_context["summary"] = (
                 f"Primary setup: {selected.get('name') or selected.get('strategy_id')} "
-                f"(score {selected.get('score')}/100)."
+                f"(score {selected.get('score')}/100, instance {selected.get('instance_key') or '-'})."
             )
             self.strategy_found.emit(strategy_context)
 
-            chart_bars = session_bars[-AUTO_CHART_LIMIT:]
+            chart_bars = momentum_bars[-AUTO_CHART_LIMIT:]
             chart_dir = Path("data") / "auto_trade_charts"
             stamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
             chart_path = chart_dir / f"{self.ticker}_{self.session_id}_{selected.get('strategy_id')}_{stamp}.png"
@@ -156,8 +158,8 @@ class StrategyLiveTradePipelinePage(live.LiveTradePipelinePage):
                 label.setText("Strategy matches")
             elif text.startswith("Automatic HIGH ATTENTION"):
                 label.setText(
-                    "Automatic HIGH ATTENTION → known setup recognition → Trade Plan → calibration validator → hard alert gate. "
-                    "TrendVisionAI no longer waits for its own small dataset to invent the trading setup; calibration is used to support or veto recognized strategies. No brokerage order is sent."
+                    "Automatic HIGH ATTENTION → momentum-aware known setup recognition → Trade Plan → calibration validator → hard alert gate. "
+                    "Premarket levels and recent volatility are context; actionable alerts still require the regular session. A later materially new setup instance can be reviewed again."
                 )
             elif text.startswith("FINAL TRADE ALERT requires"):
                 label.setText(
@@ -210,7 +212,7 @@ class StrategyLibraryPage(QWidget):
         title = QLabel("Strategy Library")
         title.setObjectName("pageTitle")
         subtitle = QLabel(
-            "Transparent deterministic implementations of common intraday setup families. The library supplies the setup; TrendVision evidence, live market data, AI chart review and our own historical calibration decide whether the current instance survives the rest of the pipeline."
+            "Momentum-aware deterministic intraday setup families. Version 2 adds premarket-high structure, bull-flag continuation, VWAP pullback/hold, volatility-aware anti-chase limits, and setup-instance identities so a later new entry window can be reviewed again."
         )
         subtitle.setObjectName("muted")
         subtitle.setWordWrap(True)
@@ -231,7 +233,7 @@ class StrategyLibraryPage(QWidget):
             header.setSectionResizeMode(column, QHeaderView.Stretch)
         root.addWidget(self.catalog, 1)
 
-        recent_title = QLabel("Recent recognized setups")
+        recent_title = QLabel("Recent recognized setup instances")
         recent_title.setStyleSheet("font-size: 12pt; font-weight: 600;")
         root.addWidget(recent_title)
         self.recent = QTableWidget(0, 5)
@@ -246,7 +248,7 @@ class StrategyLibraryPage(QWidget):
         root.addWidget(self.recent, 1)
 
         note = QLabel(
-            "The rules are deliberately explicit and same-feed. A recognized setup is not a claim of profitability. Calibration can later support, stay neutral, or veto the setup when enough TrendVision-specific cases exist."
+            "Premarket bars are context only; the final gate still requires the regular US session. Rules remain explicit and same-feed, and a recognized setup is not a claim of profitability."
         )
         note.setObjectName("muted")
         note.setWordWrap(True)
@@ -269,9 +271,9 @@ class StrategyLibraryPage(QWidget):
 
     def refresh(self) -> None:
         events = [
-            event for event in self.store.list_events(limit=300)
+            event for event in self.store.list_events(limit=500)
             if event.get("stage") == "STRATEGY_MATCH"
-        ][:60]
+        ][:80]
         self.recent.setRowCount(len(events))
         for row_index, event in enumerate(events):
             payload = event.get("payload") or {}
@@ -367,7 +369,7 @@ class StrategyPipelineMainWindow(PreviousMainWindow):
             "snapshot": snapshot,
         }
         self.live_page.set_status(
-            f"Scanning {ticker} for configured known setups before any OpenAI Trade Plan request."
+            f"Scanning {ticker} with premarket context and volatility-aware known setups before any OpenAI Trade Plan request."
         )
         worker = StrategyTradePlanWorker(
             database_path=str(self.config.database_path),
@@ -396,9 +398,10 @@ class StrategyPipelineMainWindow(PreviousMainWindow):
         session_id = int(context.get("session_id") or 0)
         primary = strategy_context.get("primary") or {}
         strategy_id = str(primary.get("strategy_id") or "UNKNOWN")
+        instance_key = str(primary.get("instance_key") or strategy_id)
         validation = self.live_qualification.validate_strategy_context(strategy_context)
         self.live_store.record_once(
-            dedup_key=f"strategy_match:v1:{session_id}:{strategy_id}",
+            dedup_key=f"strategy_match:v2:{session_id}:{instance_key}",
             ticker=ticker,
             session_id=session_id,
             stage="STRATEGY_MATCH",
@@ -406,13 +409,15 @@ class StrategyPipelineMainWindow(PreviousMainWindow):
             payload={
                 "strategy_id": strategy_id,
                 "strategy_name": primary.get("name"),
+                "setup_instance_key": instance_key,
                 "score": primary.get("score"),
                 "reason": strategy_context.get("summary"),
                 "calibration_status": validation.get("status"),
+                "premarket_context": strategy_context.get("premarket_context") or {},
             },
         )
         self.live_page.set_status(
-            f"{ticker}: {primary.get('name') or strategy_id} recognized (score {primary.get('score')}/100). Running Trade Plan inside that setup framework."
+            f"{ticker}: {primary.get('name') or strategy_id} recognized (score {primary.get('score')}/100). Running Terra for this setup instance."
         )
         self.live_page.refresh()
         self.strategy_page.refresh()
@@ -423,22 +428,25 @@ class StrategyPipelineMainWindow(PreviousMainWindow):
         session_id = int(context.get("session_id") or 0)
         bucket = int(time.time() // 300)
         self.live_store.record_once(
-            dedup_key=f"strategy_scan:none:v1:{session_id}:{bucket}",
+            dedup_key=f"strategy_scan:none:v2:{session_id}:{bucket}",
             ticker=ticker,
             session_id=session_id,
             stage="STRATEGY_SCAN",
             status="NO VALID SETUP",
-            payload={"reason": strategy_context.get("summary")},
+            payload={
+                "reason": strategy_context.get("summary"),
+                "premarket_context": strategy_context.get("premarket_context") or {},
+            },
         )
         self.live_page.set_status(
-            f"{ticker} is HIGH ATTENTION, but no configured known setup is valid right now. No OpenAI Trade Plan request was used; the scanner will check again later."
+            f"{ticker} is HIGH ATTENTION, but no configured momentum setup is valid right now. No OpenAI request was used; a later new setup can still qualify."
         )
         self.live_page.refresh()
 
     def _strategy_duplicate(self, payload: dict[str, Any]) -> None:
         context = self._auto_context or {}
         ticker = str(context.get("ticker") or "?").upper()
-        self.live_page.set_status(f"{ticker}: {payload.get('reason') or 'Current strategy setup already analyzed.'}")
+        self.live_page.set_status(f"{ticker}: {payload.get('reason') or 'Current setup instance already analyzed.'}")
 
     def _auto_plan_completed(
         self,
@@ -455,23 +463,25 @@ class StrategyPipelineMainWindow(PreviousMainWindow):
         primary = strategy_context.get("primary") or {}
         strategy_id = str(primary.get("strategy_id") or "UNKNOWN")
         strategy_name = str(primary.get("name") or strategy_id)
+        instance_key = str(primary.get("instance_key") or strategy_id)
 
         snapshot = dict(context.get("snapshot") or {})
         snapshot["plan_source"] = AUTO_PLAN_SOURCE
         snapshot["strategy_context"] = strategy_context
         snapshot["strategy_validation"] = strategy_validation
         snapshot["automatic_chart_context"] = {
-            "source": "Alpaca current regular-session 1-minute bars",
+            "source": "Alpaca 04:00+ New York 1-minute context (premarket + regular session when available)",
             "bar_count": len(bars),
             "bars": bars,
             "chart_path": chart_path,
+            "premarket_context": strategy_context.get("premarket_context") or {},
         }
         snapshot["qualification_at_plan_time"] = qualification
 
         plan_id = self.live_trade_store.save(result, snapshot, chart_path)
         evaluation = self.live_trade_store.evaluate(plan_id) or {}
         self.live_store.record_once(
-            dedup_key=f"auto_plan:v2:{session_id}:{strategy_id}",
+            dedup_key=f"auto_plan:v3:{session_id}:{instance_key}",
             ticker=ticker,
             session_id=session_id,
             stage="AUTO_PLAN",
@@ -483,6 +493,7 @@ class StrategyPipelineMainWindow(PreviousMainWindow):
                 "source": AUTO_PLAN_SOURCE,
                 "strategy_id": strategy_id,
                 "strategy_name": strategy_name,
+                "setup_instance_key": instance_key,
                 "strategy_score": primary.get("score"),
                 "strategy_calibration": strategy_validation.get("status"),
                 "detection_calibration": qualification.get("status"),
@@ -498,7 +509,7 @@ class StrategyPipelineMainWindow(PreviousMainWindow):
             )
             if gate.get("allowed"):
                 created, _event = self.live_store.record_once(
-                    dedup_key=f"final_trade_alert:v2:{session_id}:{strategy_id}",
+                    dedup_key=f"final_trade_alert:v3:{session_id}:{instance_key}",
                     ticker=ticker,
                     session_id=session_id,
                     stage="FINAL_TRADE_ALERT",
@@ -508,6 +519,7 @@ class StrategyPipelineMainWindow(PreviousMainWindow):
                         "summary": result.summary,
                         "strategy_id": strategy_id,
                         "strategy_name": strategy_name,
+                        "setup_instance_key": instance_key,
                         "strategy_score": primary.get("score"),
                         "entry_low": result.entry_low,
                         "entry_high": result.entry_high,
@@ -532,7 +544,7 @@ class StrategyPipelineMainWindow(PreviousMainWindow):
                     )
             else:
                 self.live_store.record_once(
-                    dedup_key=f"alert_blocked:v2:{session_id}:{strategy_id}:{plan_id}",
+                    dedup_key=f"alert_blocked:v3:{session_id}:{instance_key}:{plan_id}",
                     ticker=ticker,
                     session_id=session_id,
                     stage="ALERT_BLOCKED",
@@ -541,6 +553,7 @@ class StrategyPipelineMainWindow(PreviousMainWindow):
                     payload={
                         "blockers": gate.get("blockers") or [],
                         "strategy_name": strategy_name,
+                        "setup_instance_key": instance_key,
                     },
                 )
 
@@ -548,7 +561,7 @@ class StrategyPipelineMainWindow(PreviousMainWindow):
         self.strategy_page.refresh()
         self.live_page.set_status(
             f"Automatic {strategy_name} Trade Plan #{plan_id} saved for {ticker}: {result.decision}. "
-            f"Strategy calibration: {strategy_validation.get('status')}; detection calibration: {qualification.get('status')}."
+            f"This setup instance is complete; a materially new instance can be analyzed later."
         )
 
     def _run_live_pipeline(self) -> None:
