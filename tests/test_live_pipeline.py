@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+import sqlite3
 from datetime import datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -49,6 +51,7 @@ def _snapshot(*, quote_fresh: bool = True, spread_pct: float = 2.0):
                 "strategy_id": "HOD_BREAKOUT",
                 "name": "High-of-Day Breakout",
                 "status": "CANDIDATE",
+                "instance_key": "HOD_BREAKOUT|20260810T1100|10.0000",
                 "key_levels": {"entry_reference": 10.0},
                 "plan_constraints": {"max_entry_extension_pct": 4.0},
             },
@@ -123,6 +126,56 @@ def test_pipeline_store_deduplicates_events(tmp_path: Path):
     assert first is True
     assert second is False
     assert event1["id"] == event2["id"]
+
+
+def test_existing_plan_can_be_matched_by_setup_instance(tmp_path: Path):
+    database = tmp_path / "pipeline.db"
+    store = LivePipelineStore(database)
+    with sqlite3.connect(database) as connection:
+        connection.execute(
+            """
+            CREATE TABLE trade_plans (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                ticker TEXT,
+                created_at TEXT,
+                decision TEXT,
+                snapshot_json TEXT,
+                result_json TEXT
+            )
+            """
+        )
+        snapshot = {
+            "alpaca_market_context": {"session_id": 7},
+            "strategy_context": {
+                "primary": {
+                    "strategy_id": "HOD_BREAKOUT",
+                    "instance_key": "HOD_BREAKOUT|20260810T1100|10.0000",
+                }
+            },
+        }
+        connection.execute(
+            "INSERT INTO trade_plans (ticker, created_at, decision, snapshot_json, result_json) VALUES (?, ?, ?, ?, ?)",
+            (
+                "TEST",
+                "2026-08-10T11:00:00-04:00",
+                "WATCH",
+                json.dumps(snapshot),
+                json.dumps({"decision": "WATCH"}),
+            ),
+        )
+
+    found = store.existing_trade_plan_for_session(
+        7,
+        strategy_id="HOD_BREAKOUT",
+        setup_instance_key="HOD_BREAKOUT|20260810T1100|10.0000",
+    )
+    not_found = store.existing_trade_plan_for_session(
+        7,
+        strategy_id="HOD_BREAKOUT",
+        setup_instance_key="HOD_BREAKOUT|20260810T1110|10.2000",
+    )
+    assert found is not None
+    assert not_found is None
 
 
 def test_normalize_alpaca_bars_payload():
