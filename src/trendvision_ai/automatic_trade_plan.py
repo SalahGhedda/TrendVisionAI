@@ -8,6 +8,7 @@ from typing import Any
 
 from . import trade_plan_calibration_v3 as v3
 from .api_call_log import OpenAIApiCallStore
+from .live_pipeline import MIN_RISK_REWARD_TARGET_1, MIN_RISK_REWARD_TARGET_2
 
 
 AUTO_PLAN_SOURCE = "AUTO_ALPACA_1M_CHART_STRATEGY_LIBRARY"
@@ -65,6 +66,9 @@ def _apply_strategy_guardrails(
     constraints = primary.get("plan_constraints") or {}
     reference = v3.base._num(key_levels.get("entry_reference"))
     entry_high = v3.base._num(result.get("entry_high"))
+    stop = v3.base._num(result.get("stop_loss"))
+    target_1 = v3.base._num(result.get("target_1"))
+    target_2 = v3.base._num(result.get("target_2"))
     max_extension = v3.base._num(constraints.get("max_entry_extension_pct"))
     max_extension = max_extension if max_extension is not None else 5.0
 
@@ -75,6 +79,27 @@ def _apply_strategy_guardrails(
             blockers.append(
                 f"The proposed entry is {extension:.2f}% above the recognized {strategy_name or 'strategy'} reference; "
                 f"the strategy-library anti-chase limit is {max_extension:.2f}%."
+            )
+
+    if (
+        entry_high is not None
+        and stop is not None
+        and target_1 is not None
+        and target_2 is not None
+        and entry_high > stop
+    ):
+        risk = entry_high - stop
+        rr_1 = (target_1 - entry_high) / risk
+        rr_2 = (target_2 - entry_high) / risk
+        if rr_1 + 1e-9 < MIN_RISK_REWARD_TARGET_1:
+            blockers.append(
+                f"Natural Target 1 offers only {rr_1:.2f}R from the worst price in the entry zone; "
+                f"the final alert policy requires at least {MIN_RISK_REWARD_TARGET_1:.2f}R."
+            )
+        if rr_2 + 1e-9 < MIN_RISK_REWARD_TARGET_2:
+            blockers.append(
+                f"Natural Target 2 offers only {rr_2:.2f}R from the worst price in the entry zone; "
+                f"the final alert policy requires at least {MIN_RISK_REWARD_TARGET_2:.2f}R."
             )
 
     if blockers:
@@ -150,6 +175,10 @@ def analyze_automatic_trade_plan(
         "- Respect plan_constraints, especially the volatility-aware anti-chase maximum entry extension.\n"
         "- setup_type must describe the primary recognized strategy.\n"
         "- Historical calibration is a later validator/filter. The recognized setup itself comes from the strategy library, not from a learned ticker-specific rule.\n\n"
+        "RISK / REWARD DISCIPLINE:\n"
+        f"- The deterministic final alert gate requires natural Target 1 risk/reward of at least {MIN_RISK_REWARD_TARGET_1:.1f}R and Target 2 of at least {MIN_RISK_REWARD_TARGET_2:.1f}R. Risk/reward is measured conservatively from entry_high to stop_loss.\n"
+        "- Do NOT move a target farther away merely to satisfy those thresholds. Targets must remain justified by visible structure/resistance or a defensible continuation objective.\n"
+        "- If the recognized setup cannot naturally support those risk/reward thresholds at a non-chased entry, return WATCH rather than POTENTIAL TRADE.\n\n"
         "PREMARKET / MOMENTUM CONTEXT:\n"
         "- strategy_context.premarket_context may contain same-feed 04:00-09:30 New York high/low/volume context. Premarket levels are structural references, not proof that a regular-session breakout will continue.\n"
         "- The final actionable decision is still for the regular session; do not create a premarket execution instruction.\n"
