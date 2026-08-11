@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import copy
 import json
+import time
 from pathlib import Path
 from typing import Any
 
 from . import trade_plan_calibration_v3 as v3
+from .api_call_log import OpenAIApiCallStore
 
 
 AUTO_PLAN_SOURCE = "AUTO_ALPACA_1M_CHART_STRATEGY_LIBRARY"
@@ -93,6 +95,7 @@ def analyze_automatic_trade_plan(
     strategy_context: dict[str, Any],
     api_key: str,
     model: str,
+    database_path: str | Path | None = None,
 ) -> v3.base.TradePlanResult:
     """Run Trade Plan v3 inside a deterministic recognized setup framework.
 
@@ -158,31 +161,75 @@ def analyze_automatic_trade_plan(
         + v3._INSTRUCTIONS_V3
     )
 
+    ticker = str(request_snapshot.get("ticker") or "?").upper()
+    call_store: OpenAIApiCallStore | None = None
+    call_id: int | None = None
+    started = time.perf_counter()
+    if database_path is not None:
+        try:
+            call_store = OpenAIApiCallStore(database_path)
+            call_id = call_store.start_call(
+                ticker=ticker,
+                purpose="AUTOMATIC TRADE PLAN",
+                model=effective_model,
+                reasoning_effort=AUTO_TRADE_PLAN_REASONING_EFFORT,
+                strategy_id=str(primary.get("strategy_id") or "") or None,
+                strategy_name=str(primary.get("name") or "") or None,
+                strategy_score=int(primary.get("score")) if primary.get("score") is not None else None,
+            )
+        except Exception:
+            call_store = None
+            call_id = None
+
     client = OpenAI(api_key=api_key)
-    response = client.responses.create(
-        model=effective_model,
-        reasoning={"effort": AUTO_TRADE_PLAN_REASONING_EFFORT},
-        instructions=auto_instructions,
-        input=[
-            {
-                "role": "user",
-                "content": [
-                    {
-                        "type": "input_text",
-                        "text": json.dumps(request_snapshot, ensure_ascii=False, separators=(",", ":")),
-                    },
-                    {"type": "input_image", "image_url": image_url, "detail": "high"},
-                ],
-            }
-        ],
-        text={"format": v3._SCHEMA_V3},
-    )
-    parsed = v3.calibrate_trade_plan_payload_v3(
-        json.loads(response.output_text),
-        request_snapshot,
-    )
-    parsed = _adapt_auto_result(parsed)
-    parsed = _apply_strategy_guardrails(parsed, strategy_context)
+    try:
+        response = client.responses.create(
+            model=effective_model,
+            reasoning={"effort": AUTO_TRADE_PLAN_REASONING_EFFORT},
+            instructions=auto_instructions,
+            input=[
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "input_text",
+                            "text": json.dumps(request_snapshot, ensure_ascii=False, separators=(",", ":")),
+                        },
+                        {"type": "input_image", "image_url": image_url, "detail": "high"},
+                    ],
+                }
+            ],
+            text={"format": v3._SCHEMA_V3},
+        )
+        parsed = v3.calibrate_trade_plan_payload_v3(
+            json.loads(response.output_text),
+            request_snapshot,
+        )
+        parsed = _adapt_auto_result(parsed)
+        parsed = _apply_strategy_guardrails(parsed, strategy_context)
+    except Exception as exc:
+        if call_store is not None and call_id is not None:
+            try:
+                call_store.finish_call(
+                    call_id,
+                    status="FAILED",
+                    duration_ms=round((time.perf_counter() - started) * 1000),
+                    error_text=f"{type(exc).__name__}: {exc}",
+                )
+            except Exception:
+                pass
+        raise
+
+    if call_store is not None and call_id is not None:
+        try:
+            call_store.finish_call(
+                call_id,
+                status="COMPLETED",
+                duration_ms=round((time.perf_counter() - started) * 1000),
+                decision=str(parsed.get("decision") or ""),
+            )
+        except Exception:
+            pass
 
     entry_high = v3.base._num(parsed.get("entry_high"))
     stop = v3.base._num(parsed.get("stop_loss"))
@@ -190,7 +237,7 @@ def analyze_automatic_trade_plan(
     target_2 = v3.base._num(parsed.get("target_2"))
 
     return v3.base.TradePlanResult(
-        ticker=str(request_snapshot.get("ticker") or "?").upper(),
+        ticker=ticker,
         model=effective_model,
         decision=str(parsed["decision"]),
         confidence=str(parsed["confidence"]),
