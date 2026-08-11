@@ -22,7 +22,7 @@ def _result(ticker: str = "TEST") -> TradePlanResult:
         confidence="HIGH",
         risk_level="MODERATE",
         chart_structure="STRONG",
-        setup_type="breakout pullback",
+        setup_type="High-of-Day Breakout",
         summary="synthetic",
         entry_low=10.0,
         entry_high=10.2,
@@ -69,12 +69,25 @@ def _seed_feature_snapshot(database: Path, session_id: int, tags: list[str]) -> 
         )
 
 
-def _add_plan(store: TradePlanStore, session_id: int, status: str) -> int:
-    plan_id = store.save(
-        _result(),
-        {"ticker": "TEST", "alpaca_market_context": {"session_id": session_id}},
-        "chart.png",
-    )
+def _add_plan(
+    store: TradePlanStore,
+    session_id: int,
+    status: str,
+    *,
+    strategy_id: str | None = None,
+) -> int:
+    snapshot = {"ticker": "TEST", "alpaca_market_context": {"session_id": session_id}}
+    if strategy_id:
+        snapshot["strategy_context"] = {
+            "recognized": True,
+            "primary": {
+                "strategy_id": strategy_id,
+                "name": "High-of-Day Breakout",
+                "family": "MOMENTUM_BREAKOUT",
+                "score": 82,
+            },
+        }
+    plan_id = store.save(_result(), snapshot, "chart.png")
     payload = {
         "status": status,
         "horizon_complete": True,
@@ -110,7 +123,7 @@ def test_trade_plan_stats_aggregate_resolved_outcomes(tmp_path: Path):
     assert pattern["stop_first_pct"] == 25.0
 
 
-def test_qualification_stays_locked_before_global_minimum(tmp_path: Path):
+def test_calibration_is_immature_before_global_minimum(tmp_path: Path):
     database = tmp_path / "qualification-small.db"
     store = TradePlanStore(database)
     _seed_feature_snapshot(database, 1, ["ALL HIGH ATTENTION", "SIGNAL: BREAKOUT", "RV: 20x+"])
@@ -122,7 +135,7 @@ def test_qualification_stays_locked_before_global_minimum(tmp_path: Path):
     assert result["global_resolved"] == 15
 
 
-def test_qualification_can_promote_after_enough_specific_positive_history(tmp_path: Path):
+def test_calibration_can_support_after_enough_specific_positive_history(tmp_path: Path):
     database = tmp_path / "qualification-ready.db"
     store = TradePlanStore(database)
     tags = ["ALL HIGH ATTENTION", "SIGNAL: BREAKOUT", "RV: 20x+"]
@@ -131,8 +144,33 @@ def test_qualification_can_promote_after_enough_specific_positive_history(tmp_pa
         _add_plan(store, 1, "TARGET 2 HIT")
 
     result = CandidateQualificationEngine(database).qualify_session(1)
-    assert result["status"] == "EXPERIMENTALLY QUALIFIED"
+    assert result["status"] == "EXPERIMENTALLY SUPPORTED"
     assert result["global_resolved"] == 30
     assert len(result["positive_patterns"]) >= 2
     assert all(row["pattern"] != "ALL HIGH ATTENTION" for row in result["positive_patterns"])
     assert not result["negative_patterns"]
+
+
+def test_strategy_specific_history_is_grouped_and_validated(tmp_path: Path):
+    database = tmp_path / "strategy-validation.db"
+    store = TradePlanStore(database)
+    _seed_feature_snapshot(database, 1, ["ALL HIGH ATTENTION", "SIGNAL: BREAKOUT"])
+    for _ in range(15):
+        _add_plan(store, 1, "TARGET 2 HIT", strategy_id="HOD_BREAKOUT")
+
+    engine = TradePlanStatsEngine(database)
+    strategy_row = engine.pattern_map(min_resolved=1)["STRATEGY: HOD_BREAKOUT"]
+    assert strategy_row["resolved_count"] == 15
+    assert strategy_row["t1_reached_pct"] == 100.0
+
+    validation = CandidateQualificationEngine(database).validate_strategy_context(
+        {
+            "recognized": True,
+            "primary": {
+                "strategy_id": "HOD_BREAKOUT",
+                "name": "High-of-Day Breakout",
+                "family": "MOMENTUM_BREAKOUT",
+            },
+        }
+    )
+    assert validation["status"] == "MATURE POSITIVE"
