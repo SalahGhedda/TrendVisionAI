@@ -7,6 +7,7 @@ import urllib.request
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
+from zoneinfo import ZoneInfo
 
 from PySide6.QtCore import QRectF
 from PySide6.QtGui import QColor, QFont, QImage, QPainter, QPen
@@ -15,8 +16,10 @@ from .market_data import ALPACA_DATA_URL, DEFAULT_FEED
 
 
 AUTO_CHART_LOOKBACK_MINUTES = 60
-AUTO_CHART_LIMIT = 60
+AUTO_CHART_LIMIT = 120
+SESSION_BAR_LIMIT = 1000
 MIN_AUTO_CHART_BARS = 5
+NEW_YORK = ZoneInfo("America/New_York")
 
 
 class AutoChartError(RuntimeError):
@@ -62,31 +65,31 @@ def normalize_bars_payload(payload: dict[str, Any]) -> list[dict[str, Any]]:
 
 
 class AlpacaRecentBarsClient:
-    """Fetch recent 1-minute bars for automatic chart context only."""
+    """Fetch same-feed 1-minute bars for automatic chart/strategy context."""
 
     def __init__(self, key_id: str, secret: str, *, feed: str = DEFAULT_FEED) -> None:
         self.key_id = key_id.strip()
         self.secret = secret.strip()
         self.feed = (feed or DEFAULT_FEED).strip().lower()
 
-    def fetch_recent_bars(
+    def _fetch(
         self,
         symbol: str,
         *,
-        lookback_minutes: int = AUTO_CHART_LOOKBACK_MINUTES,
-        limit: int = AUTO_CHART_LIMIT,
-        now: datetime | None = None,
+        start: datetime,
+        end: datetime,
+        limit: int,
     ) -> list[dict[str, Any]]:
         ticker = symbol.upper().strip()
         if not ticker:
             return []
-        clock = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
-        start = clock - timedelta(minutes=max(5, int(lookback_minutes)))
+        start_utc = start.astimezone(timezone.utc)
+        end_utc = end.astimezone(timezone.utc)
         query = urllib.parse.urlencode(
             {
                 "timeframe": "1Min",
-                "start": start.isoformat().replace("+00:00", "Z"),
-                "end": clock.isoformat().replace("+00:00", "Z"),
+                "start": start_utc.isoformat().replace("+00:00", "Z"),
+                "end": end_utc.isoformat().replace("+00:00", "Z"),
                 "limit": max(5, min(1000, int(limit))),
                 "adjustment": "raw",
                 "feed": self.feed,
@@ -120,6 +123,38 @@ class AlpacaRecentBarsClient:
 
         bars = normalize_bars_payload(payload if isinstance(payload, dict) else {})
         return bars[-max(5, int(limit)) :]
+
+    def fetch_recent_bars(
+        self,
+        symbol: str,
+        *,
+        lookback_minutes: int = AUTO_CHART_LOOKBACK_MINUTES,
+        limit: int = AUTO_CHART_LIMIT,
+        now: datetime | None = None,
+    ) -> list[dict[str, Any]]:
+        clock = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
+        start = clock - timedelta(minutes=max(5, int(lookback_minutes)))
+        return self._fetch(symbol, start=start, end=clock, limit=limit)
+
+    def fetch_session_bars(
+        self,
+        symbol: str,
+        *,
+        now: datetime | None = None,
+        limit: int = SESSION_BAR_LIMIT,
+    ) -> list[dict[str, Any]]:
+        """Fetch today's regular-session bars from 09:30 New York through now.
+
+        The live pipeline itself only invokes this during the configured regular
+        session. Returning the full session lets the strategy library inspect the
+        opening range and compute session VWAP without inventing unavailable data.
+        """
+        clock = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
+        eastern = clock.astimezone(NEW_YORK)
+        session_start = eastern.replace(hour=9, minute=30, second=0, microsecond=0)
+        if eastern < session_start:
+            return []
+        return self._fetch(symbol, start=session_start, end=clock, limit=limit)
 
 
 def _price_y(price: float, low: float, high: float, top: float, height: float) -> float:
@@ -174,7 +209,7 @@ def render_candles_png(
 
     count = len(bars)
     slot = chart_width / max(1, count)
-    body_width = max(3.0, min(14.0, slot * 0.58))
+    body_width = max(2.0, min(14.0, slot * 0.58))
     max_volume = max(float(bar.get("volume") or 0.0) for bar in bars) or 1.0
 
     for index, bar in enumerate(bars):
@@ -216,7 +251,7 @@ def render_candles_png(
     painter.drawText(
         int(left),
         48,
-        f"Source: Alpaca {feed.upper()} historical 1-minute bars • no BUY/SELL/SL/TP overlay • partial-venue when feed=IEX",
+        f"Source: Alpaca {feed.upper()} 1-minute bars • no BUY/SELL/SL/TP overlay • partial-venue when feed=IEX",
     )
     painter.drawText(int(left), 628, f"Bars shown: {len(bars)}")
     painter.end()
