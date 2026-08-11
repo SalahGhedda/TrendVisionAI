@@ -7,11 +7,10 @@ from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo
 
-from .qualification import CandidateQualificationEngine
 from .trade_plan_calibration_v3 import MAX_ACTIONABLE_OBSERVED_SPREAD_PCT
 
 
-PIPELINE_VERSION = 1
+PIPELINE_VERSION = 2
 NEW_YORK = ZoneInfo("America/New_York")
 
 
@@ -158,7 +157,13 @@ class LivePipelineStore:
             ).fetchall()
         return [self._decode(row) for row in rows]
 
-    def existing_trade_plan_for_session(self, session_id: int, limit: int = 500) -> dict[str, Any] | None:
+    def existing_trade_plan_for_session(
+        self,
+        session_id: int,
+        *,
+        strategy_id: str | None = None,
+        limit: int = 500,
+    ) -> dict[str, Any] | None:
         try:
             with self._connect() as connection:
                 rows = connection.execute(
@@ -172,6 +177,7 @@ class LivePipelineStore:
                 ).fetchall()
         except sqlite3.OperationalError:
             return None
+        requested_strategy = str(strategy_id or "").strip()
         for row in rows:
             item = dict(row)
             try:
@@ -185,6 +191,10 @@ class LivePipelineStore:
                 continue
             if stored_session != int(session_id):
                 continue
+            if requested_strategy:
+                primary = ((snapshot.get("strategy_context") or {}).get("primary") or {})
+                if str(primary.get("strategy_id") or "").strip() != requested_strategy:
+                    continue
             try:
                 result = json.loads(item.get("result_json") or "{}")
             except json.JSONDecodeError:
@@ -200,16 +210,32 @@ def final_trade_alert_gate(
     qualification: dict[str, Any],
     plan: dict[str, Any],
     snapshot: dict[str, Any],
+    strategy_validation: dict[str, Any] | None = None,
     now: datetime | None = None,
 ) -> dict[str, Any]:
-    """Deterministic blockers that AI cannot override before a user-facing alert."""
+    """Deterministic blockers that AI cannot override before a user-facing alert.
+
+    A recognized known setup is now the primary strategy requirement. Historical
+    calibration is a validator/filter: mature negative evidence vetoes an alert,
+    while immature history does not force the system to rediscover the setup from
+    scratch before it can be evaluated.
+    """
     blockers: list[str] = []
     session = regular_session_state(now)
     if not session["open"]:
         blockers.append("MARKET_CLOSED")
 
-    if qualification.get("status") != "EXPERIMENTALLY QUALIFIED":
-        blockers.append("NOT_HISTORICALLY_QUALIFIED")
+    strategy = snapshot.get("strategy_context") or {}
+    primary = strategy.get("primary") or {}
+    if not strategy.get("recognized") or str(primary.get("status") or "") != "CANDIDATE":
+        blockers.append("NO_RECOGNIZED_STRATEGY")
+
+    validation = strategy_validation or snapshot.get("strategy_validation") or {}
+    if str(validation.get("status") or "").upper() == "MATURE NEGATIVE":
+        blockers.append("STRATEGY_CALIBRATION_NEGATIVE")
+
+    if str(qualification.get("status") or "").upper() == "MONITOR / RISK":
+        blockers.append("DETECTION_CALIBRATION_RISK")
 
     if str(plan.get("decision") or "") != "POTENTIAL TRADE":
         blockers.append("TRADE_PLAN_NOT_POTENTIAL")
@@ -249,6 +275,19 @@ def final_trade_alert_gate(
         if not coherent:
             blockers.append("INCOHERENT_LEVELS")
 
+        reference = None
+        max_extension = None
+        try:
+            reference = float((primary.get("key_levels") or {}).get("entry_reference"))
+            max_extension = float((primary.get("plan_constraints") or {}).get("max_entry_extension_pct"))
+        except (TypeError, ValueError):
+            reference = None
+            max_extension = None
+        if reference is not None and reference > 0 and max_extension is not None and len(values) == len(required):
+            entry_extension = (values["entry_high"] / reference - 1.0) * 100.0
+            if entry_extension > max_extension:
+                blockers.append("STRATEGY_ENTRY_TOO_EXTENDED")
+
     if str(plan.get("risk_level") or "").upper() == "EXTREME":
         blockers.append("EXTREME_RISK")
     if str(plan.get("chart_structure") or "").upper() in {"DANGEROUS", "UNCLEAR"}:
@@ -271,6 +310,10 @@ def final_trade_alert_gate(
         "market_session": session,
         "observed_spread_pct": spread_value,
         "spread_guardrail_pct": MAX_ACTIONABLE_OBSERVED_SPREAD_PCT,
+        "strategy_id": primary.get("strategy_id"),
+        "strategy_name": primary.get("name"),
+        "strategy_validation_status": validation.get("status"),
+        "detection_calibration_status": qualification.get("status"),
     }
 
 
@@ -279,4 +322,11 @@ def qualification_summary(qualification: dict[str, Any]) -> str:
     names = [str(item.get("pattern") or "") for item in positives[:3] if item.get("pattern")]
     if names:
         return "; ".join(names)
-    return str(qualification.get("reason") or "Historical evidence gate passed.")
+    return str(qualification.get("reason") or "Calibration evidence is not mature enough for a directional vote.")
+
+
+def strategy_summary(snapshot: dict[str, Any]) -> str:
+    primary = ((snapshot.get("strategy_context") or {}).get("primary") or {})
+    if not primary:
+        return "No recognized strategy."
+    return f"{primary.get('name') or primary.get('strategy_id')} (score {primary.get('score') or '-'} / 100)"
