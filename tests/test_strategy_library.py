@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 
+from trendvision_ai.automatic_trade_plan import _apply_strategy_guardrails
 from trendvision_ai.strategy_library import detect_known_setups, strategy_catalog
 
 
@@ -84,3 +85,29 @@ def test_flat_chart_has_no_known_setup():
     context = detect_known_setups(bars)
     assert context["recognized"] is False
     assert context["primary"] is None
+
+
+def test_automatic_plan_is_downgraded_when_entry_chases_strategy_reference():
+    parsed = {
+        "decision": "POTENTIAL TRADE",
+        "setup_type": "anything",
+        "entry_low": 10.8,
+        "entry_high": 11.0,
+        "stop_loss": 9.8,
+        "target_1": 12.0,
+        "target_2": 13.0,
+        "risk_factors": [],
+    }
+    strategy_context = {
+        "recognized": True,
+        "primary": {
+            "name": "High-of-Day Breakout",
+            "key_levels": {"entry_reference": 10.0},
+            "plan_constraints": {"max_entry_extension_pct": 4.0},
+        },
+    }
+    result = _apply_strategy_guardrails(parsed, strategy_context)
+    assert result["decision"] == "WATCH"
+    assert result["entry_low"] is None
+    assert result["entry_high"] is None
+    assert result["setup_type"] == "High-of-Day Breakout"
