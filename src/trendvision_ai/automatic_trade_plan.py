@@ -182,6 +182,7 @@ def analyze_automatic_trade_plan(
             call_id = None
 
     client = OpenAI(api_key=api_key)
+    raw_response_text = ""
     try:
         response = client.responses.create(
             model=effective_model,
@@ -201,8 +202,9 @@ def analyze_automatic_trade_plan(
             ],
             text={"format": v3._SCHEMA_V3},
         )
+        raw_response_text = str(response.output_text or "")
         parsed = v3.calibrate_trade_plan_payload_v3(
-            json.loads(response.output_text),
+            json.loads(raw_response_text),
             request_snapshot,
         )
         parsed = _adapt_auto_result(parsed)
@@ -215,6 +217,7 @@ def analyze_automatic_trade_plan(
                     status="FAILED",
                     duration_ms=round((time.perf_counter() - started) * 1000),
                     error_text=f"{type(exc).__name__}: {exc}",
+                    response_text=raw_response_text,
                 )
             except Exception:
                 pass
@@ -227,6 +230,7 @@ def analyze_automatic_trade_plan(
                 status="COMPLETED",
                 duration_ms=round((time.perf_counter() - started) * 1000),
                 decision=str(parsed.get("decision") or ""),
+                response_text=raw_response_text,
             )
         except Exception:
             pass
