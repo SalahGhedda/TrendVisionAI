@@ -15,8 +15,12 @@ from trendvision_ai.live_pipeline import (
 NY = ZoneInfo("America/New_York")
 
 
-def _qualification(status: str = "EXPERIMENTALLY QUALIFIED"):
-    return {"status": status, "positive_patterns": [{"pattern": "SIGNAL: BREAKOUT"}]}
+def _qualification(status: str = "INSUFFICIENT EVIDENCE"):
+    return {"status": status, "positive_patterns": []}
+
+
+def _strategy_validation(status: str = "CALIBRATION IMMATURE"):
+    return {"status": status, "strategy_id": "HOD_BREAKOUT"}
 
 
 def _plan():
@@ -39,6 +43,16 @@ def _snapshot(*, quote_fresh: bool = True, spread_pct: float = 2.0):
             "market_event_freshness": {"latest_quote_fresh": quote_fresh},
             "latest": {"spread_pct": spread_pct},
         },
+        "strategy_context": {
+            "recognized": True,
+            "primary": {
+                "strategy_id": "HOD_BREAKOUT",
+                "name": "High-of-Day Breakout",
+                "status": "CANDIDATE",
+                "key_levels": {"entry_reference": 10.0},
+                "plan_constraints": {"max_entry_extension_pct": 4.0},
+            },
+        },
         "trendvision": {"recent_convergence": {"events": []}},
     }
 
@@ -50,10 +64,11 @@ def test_regular_session_gate():
     assert regular_session_state(closed_time)["open"] is False
 
 
-def test_final_alert_gate_allows_coherent_qualified_plan():
+def test_final_alert_gate_allows_known_setup_with_immature_history():
     open_time = datetime(2026, 8, 10, 11, 0, tzinfo=NY)
     gate = final_trade_alert_gate(
         qualification=_qualification(),
+        strategy_validation=_strategy_validation(),
         plan=_plan(),
         snapshot=_snapshot(),
         now=open_time,
@@ -62,10 +77,24 @@ def test_final_alert_gate_allows_coherent_qualified_plan():
     assert gate["blockers"] == []
 
 
+def test_final_alert_gate_blocks_mature_negative_strategy_calibration():
+    open_time = datetime(2026, 8, 10, 11, 0, tzinfo=NY)
+    gate = final_trade_alert_gate(
+        qualification=_qualification(),
+        strategy_validation=_strategy_validation("MATURE NEGATIVE"),
+        plan=_plan(),
+        snapshot=_snapshot(),
+        now=open_time,
+    )
+    assert gate["allowed"] is False
+    assert "STRATEGY_CALIBRATION_NEGATIVE" in gate["blockers"]
+
+
 def test_final_alert_gate_blocks_stale_quote_and_wide_spread():
     open_time = datetime(2026, 8, 10, 11, 0, tzinfo=NY)
     gate = final_trade_alert_gate(
         qualification=_qualification(),
+        strategy_validation=_strategy_validation(),
         plan=_plan(),
         snapshot=_snapshot(quote_fresh=False, spread_pct=20.0),
         now=open_time,
@@ -78,18 +107,18 @@ def test_final_alert_gate_blocks_stale_quote_and_wide_spread():
 def test_pipeline_store_deduplicates_events(tmp_path: Path):
     store = LivePipelineStore(tmp_path / "pipeline.db")
     first, event1 = store.record_once(
-        dedup_key="qualified:1",
+        dedup_key="strategy:1:HOD_BREAKOUT",
         ticker="TEST",
         session_id=1,
-        stage="QUALIFIED_CANDIDATE",
-        status="EXPERIMENTALLY QUALIFIED",
+        stage="STRATEGY_MATCH",
+        status="KNOWN SETUP RECOGNIZED",
     )
     second, event2 = store.record_once(
-        dedup_key="qualified:1",
+        dedup_key="strategy:1:HOD_BREAKOUT",
         ticker="TEST",
         session_id=1,
-        stage="QUALIFIED_CANDIDATE",
-        status="EXPERIMENTALLY QUALIFIED",
+        stage="STRATEGY_MATCH",
+        status="KNOWN SETUP RECOGNIZED",
     )
     assert first is True
     assert second is False
