@@ -95,7 +95,7 @@ def analyze_automatic_trade_plan(
     strategy_context: dict[str, Any],
     api_key: str,
     model: str,
-    database_path: str | Path | None = None,
+    database_path: str | Path | None = Path("data") / "openai_api_calls.db",
 ) -> v3.base.TradePlanResult:
     """Run Trade Plan v3 inside a deterministic recognized setup framework.
 
