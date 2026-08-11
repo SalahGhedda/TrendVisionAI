@@ -11,12 +11,7 @@ def _now_iso() -> str:
 
 
 class OpenAIApiCallStore:
-    """Persistent audit log for OpenAI requests made by TrendVisionAI.
-
-    The journal records that a request was attempted, the context needed to
-    understand why it happened, and the model's structured response. It never
-    stores API keys, raw prompts, or chart image bytes.
-    """
+    """Persistent audit log for OpenAI requests made by TrendVisionAI."""
 
     def __init__(self, database_path: str | Path) -> None:
         self.database_path = Path(database_path)
@@ -44,6 +39,7 @@ class OpenAIApiCallStore:
                     strategy_id TEXT,
                     strategy_name TEXT,
                     strategy_score INTEGER,
+                    setup_instance_key TEXT,
                     status TEXT NOT NULL DEFAULT 'IN PROGRESS',
                     duration_ms INTEGER,
                     decision TEXT,
@@ -65,6 +61,10 @@ class OpenAIApiCallStore:
                 connection.execute(
                     "ALTER TABLE openai_api_calls ADD COLUMN response_text TEXT NOT NULL DEFAULT ''"
                 )
+            if "setup_instance_key" not in columns:
+                connection.execute(
+                    "ALTER TABLE openai_api_calls ADD COLUMN setup_instance_key TEXT"
+                )
 
     def start_call(
         self,
@@ -76,6 +76,7 @@ class OpenAIApiCallStore:
         strategy_id: str | None = None,
         strategy_name: str | None = None,
         strategy_score: int | None = None,
+        setup_instance_key: str | None = None,
     ) -> int:
         now = _now_iso()
         with self._connect() as connection:
@@ -84,8 +85,8 @@ class OpenAIApiCallStore:
                 INSERT INTO openai_api_calls (
                     started_at, updated_at, ticker, purpose, model,
                     reasoning_effort, strategy_id, strategy_name, strategy_score,
-                    status
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'IN PROGRESS')
+                    setup_instance_key, status
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'IN PROGRESS')
                 """,
                 (
                     now,
@@ -97,6 +98,7 @@ class OpenAIApiCallStore:
                     str(strategy_id or "") or None,
                     str(strategy_name or "") or None,
                     int(strategy_score) if strategy_score is not None else None,
+                    str(setup_instance_key or "") or None,
                 ),
             )
             return int(cursor.lastrowid)
