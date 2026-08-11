@@ -78,6 +78,27 @@ def test_final_alert_gate_allows_known_setup_with_immature_history():
     )
     assert gate["allowed"] is True
     assert gate["blockers"] == []
+    assert gate["observed_risk_reward_target_1"] >= 1.0
+    assert gate["observed_risk_reward_target_2"] >= 2.0
+
+
+def test_final_alert_gate_blocks_low_risk_reward():
+    open_time = datetime(2026, 8, 10, 11, 0, tzinfo=NY)
+    plan = _plan()
+    plan["target_1"] = 10.6
+    plan["target_2"] = 11.2
+    gate = final_trade_alert_gate(
+        qualification=_qualification(),
+        strategy_validation=_strategy_validation(),
+        plan=plan,
+        snapshot=_snapshot(),
+        now=open_time,
+    )
+    assert gate["allowed"] is False
+    assert "RISK_REWARD_T1_TOO_LOW" in gate["blockers"]
+    assert "RISK_REWARD_T2_TOO_LOW" in gate["blockers"]
+    assert gate["observed_risk_reward_target_1"] < 1.0
+    assert gate["observed_risk_reward_target_2"] < 2.0
 
 
 def test_final_alert_gate_blocks_mature_negative_strategy_calibration():
