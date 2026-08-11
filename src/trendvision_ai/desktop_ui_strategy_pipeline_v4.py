@@ -8,14 +8,21 @@ from PySide6.QtCore import QThread, QTimer, Qt, Signal
 from PySide6.QtWidgets import QTableWidgetItem
 
 from . import desktop_ui_calibration_validator as validator_ui
+from . import desktop_ui_market as market_ui
 from . import desktop_ui_strategy_pipeline as strategy_base
 from . import desktop_ui_strategy_pipeline_v3 as current
 from . import desktop_ui_trade_stats as trade_stats_ui
+from .automatic_outcomes import AutomaticOutcomeStore
+from .performance_outcomes import (
+    configure_sqlite_for_desktop,
+    install_outcome_performance_patches,
+)
 from .performance_v2 import install_performance_patches
 from .qualification import CandidateQualificationEngine
 
 
 install_performance_patches()
+install_outcome_performance_patches()
 base = current.base
 CALIBRATION_BACKGROUND_INTERVAL_SECONDS = 60.0
 
@@ -26,6 +33,11 @@ def _keep_stats_cache_fresh(engine: Any) -> None:
         # Background refresh owns invalidation/replacement in V4. Prevent the
         # generic short cache TTL from causing a surprise rebuild on the GUI thread.
         cache["built_at"] = time.monotonic()
+
+
+def _skip_gui_outcome_refresh(self: Any) -> dict[str, int]:
+    """Automatic outcomes are refreshed by CalibrationRefreshWorker in V4."""
+    return {"session_changes": 0, "review_changes": 0}
 
 
 def _fast_trade_alerts_refresh(self: Any, select_alert_id: int | None = None) -> None:
@@ -96,8 +108,6 @@ def _light_trade_stats_refresh(self: Any) -> None:
     key = (built_at, int(self.minimum_combo.currentData() or 0))
     if getattr(self, "_perf_render_key", None) == key:
         return
-    # The inherited page refreshes the engine only when this timestamp is old.
-    # Keep it current because the V4 background worker owns that heavy work.
     self._last_engine_refresh = time.monotonic()
     _original_trade_stats_refresh(self)
     self._perf_render_key = key
@@ -113,11 +123,12 @@ def _light_validator_refresh(self: Any) -> None:
     _original_validator_refresh(self)
 
 
-# These widgets are constructed during the inherited window initialization, so
-# patch their refresh methods before V4 calls super().__init__().
+# These widgets/controllers are constructed during inherited initialization, so
+# patch them before V4 calls super().__init__().
 current.TradeAlertsPage.refresh = _fast_trade_alerts_refresh
 trade_stats_ui.TradePlanStatisticsPage.refresh = _light_trade_stats_refresh
 validator_ui.CalibrationValidatorPage.refresh = _light_validator_refresh
+market_ui.MarketTrackerController._refresh_automatic_outcomes = _skip_gui_outcome_refresh
 
 
 class CalibrationRefreshWorker(QThread):
@@ -130,6 +141,7 @@ class CalibrationRefreshWorker(QThread):
 
     def run(self) -> None:
         try:
+            outcomes = AutomaticOutcomeStore(self.database_path).refresh_all_due_outcomes(limit=200)
             engine = CandidateQualificationEngine(self.database_path)
             refresh_result = engine.refresh(limit=500)
             # Build the expensive aggregate cache here too, so the GUI thread can
@@ -138,6 +150,7 @@ class CalibrationRefreshWorker(QThread):
             patterns = engine.trade_stats.pattern_stats(min_resolved=0)
             self.completed.emit(
                 {
+                    "outcomes": outcomes,
                     "refresh": refresh_result,
                     "overview": overview,
                     "patterns": patterns,
@@ -155,6 +168,8 @@ class StrategyPipelineMainWindowV4(current.StrategyPipelineMainWindowV3):
         self._perf_last_calibration_refresh = 0.0
         self._perf_calibration_ready = False
         super().__init__()
+
+        configure_sqlite_for_desktop(self.config.database_path)
 
         # The underlying market tracker updates at a slower cadence than the old
         # 2-second UI redraw loop. Five seconds keeps the display responsive while
