@@ -9,6 +9,8 @@ from . import trade_plan_calibration_v3 as v3
 
 
 AUTO_PLAN_SOURCE = "AUTO_ALPACA_1M_CHART_STRATEGY_LIBRARY"
+AUTO_TRADE_PLAN_MODEL = "gpt-5.6-terra"
+AUTO_TRADE_PLAN_REASONING_EFFORT = "medium"
 
 
 class NoRecognizedStrategyError(RuntimeError):
@@ -92,7 +94,12 @@ def analyze_automatic_trade_plan(
     api_key: str,
     model: str,
 ) -> v3.base.TradePlanResult:
-    """Run Trade Plan v3 inside a deterministic recognized setup framework."""
+    """Run Trade Plan v3 inside a deterministic recognized setup framework.
+
+    Automatic strategy plans intentionally use GPT-5.6 Terra at medium reasoning.
+    The ``model`` argument is retained for compatibility with the existing UI
+    worker, but manual-review model settings do not control this live stage.
+    """
     from openai import OpenAI
 
     primary = strategy_context.get("primary") or {}
@@ -100,6 +107,8 @@ def analyze_automatic_trade_plan(
         raise NoRecognizedStrategyError(
             "No configured strategy-library setup is currently recognized; OpenAI trade-plan analysis is skipped."
         )
+
+    effective_model = AUTO_TRADE_PLAN_MODEL
 
     request_snapshot = v3._normalize_unobserved_zero_borrow(snapshot)
     market = request_snapshot.get("alpaca_market_context") or {}
@@ -110,6 +119,10 @@ def analyze_automatic_trade_plan(
     request_snapshot = copy.deepcopy(request_snapshot)
     request_snapshot["trade_plan_version"] = v3.TRADE_PLAN_VERSION
     request_snapshot["plan_source"] = AUTO_PLAN_SOURCE
+    request_snapshot["automatic_model_config"] = {
+        "model": effective_model,
+        "reasoning_effort": AUTO_TRADE_PLAN_REASONING_EFFORT,
+    }
     request_snapshot["strategy_context"] = copy.deepcopy(strategy_context)
     request_snapshot["automatic_chart_context"] = {
         "source": "Alpaca current regular-session 1-minute bars",
@@ -147,7 +160,8 @@ def analyze_automatic_trade_plan(
 
     client = OpenAI(api_key=api_key)
     response = client.responses.create(
-        model=model,
+        model=effective_model,
+        reasoning={"effort": AUTO_TRADE_PLAN_REASONING_EFFORT},
         instructions=auto_instructions,
         input=[
             {
@@ -177,7 +191,7 @@ def analyze_automatic_trade_plan(
 
     return v3.base.TradePlanResult(
         ticker=str(request_snapshot.get("ticker") or "?").upper(),
-        model=model,
+        model=effective_model,
         decision=str(parsed["decision"]),
         confidence=str(parsed["confidence"]),
         risk_level=str(parsed["risk_level"]),
