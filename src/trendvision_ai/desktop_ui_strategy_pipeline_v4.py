@@ -7,8 +7,10 @@ from typing import Any
 from PySide6.QtCore import QThread, QTimer, Qt, Signal
 from PySide6.QtWidgets import QTableWidgetItem
 
+from . import desktop_ui_calibration_validator as validator_ui
 from . import desktop_ui_strategy_pipeline as strategy_base
 from . import desktop_ui_strategy_pipeline_v3 as current
+from . import desktop_ui_trade_stats as trade_stats_ui
 from .performance_v2 import install_performance_patches
 from .qualification import CandidateQualificationEngine
 
@@ -16,6 +18,14 @@ from .qualification import CandidateQualificationEngine
 install_performance_patches()
 base = current.base
 CALIBRATION_BACKGROUND_INTERVAL_SECONDS = 60.0
+
+
+def _keep_stats_cache_fresh(engine: Any) -> None:
+    cache = getattr(engine, "_perf_stats_cache", None)
+    if isinstance(cache, dict):
+        # Background refresh owns invalidation/replacement in V4. Prevent the
+        # generic short cache TTL from causing a surprise rebuild on the GUI thread.
+        cache["built_at"] = time.monotonic()
 
 
 def _fast_trade_alerts_refresh(self: Any, select_alert_id: int | None = None) -> None:
@@ -75,9 +85,39 @@ def _fast_trade_alerts_refresh(self: Any, select_alert_id: int | None = None) ->
     self._perf_render_revision = revision
 
 
-# V3 constructs this page during its __init__, so patch the method before the
-# V4 window calls super().__init__().
+_original_trade_stats_refresh = trade_stats_ui.TradePlanStatisticsPage.refresh
+
+
+def _light_trade_stats_refresh(self: Any) -> None:
+    """Render the last background-built stats snapshot without re-evaluating plans."""
+    _keep_stats_cache_fresh(self.engine)
+    cache = getattr(self.engine, "_perf_stats_cache", None)
+    built_at = float(cache.get("built_at") or 0.0) if isinstance(cache, dict) else 0.0
+    key = (built_at, int(self.minimum_combo.currentData() or 0))
+    if getattr(self, "_perf_render_key", None) == key:
+        return
+    # The inherited page refreshes the engine only when this timestamp is old.
+    # Keep it current because the V4 background worker owns that heavy work.
+    self._last_engine_refresh = time.monotonic()
+    _original_trade_stats_refresh(self)
+    self._perf_render_key = key
+
+
+_original_validator_refresh = validator_ui.CalibrationValidatorPage.refresh
+
+
+def _light_validator_refresh(self: Any) -> None:
+    """Keep candidate display live while using background-built calibration stats."""
+    _keep_stats_cache_fresh(self.engine.trade_stats)
+    self._last_engine_refresh = time.monotonic()
+    _original_validator_refresh(self)
+
+
+# These widgets are constructed during the inherited window initialization, so
+# patch their refresh methods before V4 calls super().__init__().
 current.TradeAlertsPage.refresh = _fast_trade_alerts_refresh
+trade_stats_ui.TradePlanStatisticsPage.refresh = _light_trade_stats_refresh
+validator_ui.CalibrationValidatorPage.refresh = _light_validator_refresh
 
 
 class CalibrationRefreshWorker(QThread):
@@ -140,14 +180,28 @@ class StrategyPipelineMainWindowV4(current.StrategyPipelineMainWindowV3):
         worker.start()
         return True
 
+    def _apply_stats_cache(self, engine: Any, overview: dict[str, Any], patterns: list[dict[str, Any]]) -> None:
+        engine._perf_stats_cache = {
+            "built_at": time.monotonic(),
+            "overview": dict(overview),
+            "patterns": [dict(row) for row in patterns],
+        }
+
     def _calibration_refresh_completed(self, payload: dict[str, Any]) -> None:
         overview = dict(payload.get("overview") or {})
         patterns = [dict(row) for row in (payload.get("patterns") or [])]
-        self.live_qualification.trade_stats._perf_stats_cache = {
-            "built_at": time.monotonic(),
-            "overview": overview,
-            "patterns": patterns,
-        }
+
+        self._apply_stats_cache(self.live_qualification.trade_stats, overview, patterns)
+        try:
+            self._apply_stats_cache(self.trade_stats_page.engine, overview, patterns)
+            self.trade_stats_page._perf_render_key = None
+        except Exception:
+            pass
+        try:
+            self._apply_stats_cache(self.qualification_page.engine.trade_stats, overview, patterns)
+        except Exception:
+            pass
+
         self._perf_calibration_ready = True
         QTimer.singleShot(0, self._run_live_pipeline)
 
@@ -162,12 +216,14 @@ class StrategyPipelineMainWindowV4(current.StrategyPipelineMainWindowV3):
             pass
 
     def _run_live_pipeline(self) -> None:
-        busy = self._start_background_calibration_if_due()
+        self._start_background_calibration_if_due()
         if not self._perf_calibration_ready:
             self.live_page.set_status(
                 "Loading calibration/statistics in the background. Scanner capture and market tracking remain active."
             )
             return
+
+        _keep_stats_cache_fresh(self.live_qualification.trade_stats)
 
         # Skip V2's synchronous self.live_qualification.refresh() override. The
         # original strategy pipeline logic is lightweight enough after the DB and
