@@ -54,48 +54,60 @@ class MissedOpportunitiesPage(QWidget):
 
         root = QVBoxLayout(self)
         root.setContentsMargins(28, 24, 28, 24)
-        root.setSpacing(14)
+        root.setSpacing(12)
 
         title = QLabel("Missed Opportunities")
         title.setObjectName("pageTitle")
         subtitle = QLabel(
-            f"Diagnostics for recent HIGH ATTENTION tracking sessions. A 'major runner' currently means at least +{DEFAULT_MAJOR_MOVE_PCT:.0f}% MFE after tracking began. "
-            "The page explains where the pipeline stopped: no setup, Terra WATCH/REJECT, hard gate, or final alert. Hindsight movement does not mean an entry was safely available."
+            f"Stage-aware diagnostics for recent HIGH ATTENTION sessions. A 'major runner' means at least +{DEFAULT_MAJOR_MOVE_PCT:.0f}% MFE after tracking began, "
+            "but the page now separately measures how much movement remained after the first setup recognition and after Terra's first completed decision. "
+            "This prevents an earlier pump from being unfairly blamed on a later WATCH/REJECT."
         )
         subtitle.setObjectName("muted")
         subtitle.setWordWrap(True)
         root.addWidget(title)
         root.addWidget(subtitle)
 
-        metrics = QHBoxLayout()
+        metrics_top = QHBoxLayout()
         self.major_card = base.MetricCard("Major runners")
         self.alerted_card = base.MetricCard("Alerted")
-        self.missed_card = base.MetricCard("Missed")
+        self.missed_card = base.MetricCard("True misses")
         self.no_setup_card = base.MetricCard("No setup")
-        self.terra_card = base.MetricCard("Terra filtered")
-        self.gate_card = base.MetricCard("Hard gate")
         for card in (
             self.major_card,
             self.alerted_card,
             self.missed_card,
             self.no_setup_card,
-            self.terra_card,
+        ):
+            metrics_top.addWidget(card)
+        root.addLayout(metrics_top)
+
+        metrics_bottom = QHBoxLayout()
+        self.late_card = base.MetricCard("Late setup")
+        self.terra_missed_card = base.MetricCard("Terra missed")
+        self.terra_filtered_card = base.MetricCard("Terra filtered OK")
+        self.gate_card = base.MetricCard("Hard gate miss")
+        for card in (
+            self.late_card,
+            self.terra_missed_card,
+            self.terra_filtered_card,
             self.gate_card,
         ):
-            metrics.addWidget(card)
-        root.addLayout(metrics)
+            metrics_bottom.addWidget(card)
+        root.addLayout(metrics_bottom)
 
-        self.table = QTableWidget(0, 10)
+        self.table = QTableWidget(0, 11)
         self.table.setHorizontalHeaderLabels(
             [
                 "Started",
                 "Ticker",
                 "Attention",
-                "MFE",
-                "Time to peak",
+                "MFE after attention",
+                "MFE after setup",
+                "MFE after Terra",
                 "Setup matches",
                 "Terra plans",
-                "Decisions",
+                "First Terra",
                 "Final alert",
                 "Diagnosis",
             ]
@@ -105,9 +117,9 @@ class MissedOpportunitiesPage(QWidget):
         self.table.setEditTriggers(QTableWidget.NoEditTriggers)
         self.table.verticalHeader().setVisible(False)
         header = self.table.horizontalHeader()
-        for column in range(9):
+        for column in range(10):
             header.setSectionResizeMode(column, QHeaderView.ResizeToContents)
-        header.setSectionResizeMode(9, QHeaderView.Stretch)
+        header.setSectionResizeMode(10, QHeaderView.Stretch)
         self.table.itemSelectionChanged.connect(self._show_details)
         root.addWidget(self.table, 1)
 
@@ -120,14 +132,14 @@ class MissedOpportunitiesPage(QWidget):
         root.addLayout(actions)
 
         self.details = QLabel(
-            "Select a row to see why TrendVisionAI did or did not produce a final trade alert."
+            "Select a row to compare what happened after HIGH ATTENTION, setup recognition, and Terra's decision."
         )
         self.details.setObjectName("muted")
         self.details.setWordWrap(True)
         root.addWidget(self.details)
 
         note = QLabel(
-            "MFE is measured from the first successful Alpaca sample after HIGH ATTENTION. It is a diagnostic of what happened afterward, not a backtested claim that the full move could have been captured. IEX remains partial-venue data."
+            "Each MFE uses the first successful Alpaca observation at/after that stage as its own reference. These are hindsight diagnostics, not proof that the full move was safely tradable. IEX remains partial-venue data."
         )
         note.setObjectName("muted")
         note.setWordWrap(True)
@@ -145,29 +157,31 @@ class MissedOpportunitiesPage(QWidget):
         self.alerted_card.set_value(stats["alerted"])
         self.missed_card.set_value(stats["missed"])
         self.no_setup_card.set_value(stats["no_setup"])
-        self.terra_card.set_value(stats["terra_filtered"])
+        self.late_card.set_value(stats["late_setup"])
+        self.terra_missed_card.set_value(stats["terra_missed"])
+        self.terra_filtered_card.set_value(stats["terra_filtered_correctly"])
         self.gate_card.set_value(stats["hard_gate"])
 
         self.table.setUpdatesEnabled(False)
         try:
             self.table.setRowCount(len(rows))
             for row_index, row in enumerate(rows):
-                decisions = list(dict.fromkeys(row.get("decisions") or []))
                 values = [
                     _display_time(row.get("started_at")),
                     row.get("ticker") or "-",
                     row.get("trigger_score") if row.get("trigger_score") is not None else "-",
                     _pct(row.get("mfe_pct")),
-                    _minutes(row.get("time_to_peak_minutes")),
+                    _pct(row.get("mfe_after_strategy_pct")),
+                    _pct(row.get("mfe_after_terra_pct")),
                     row.get("strategy_matches") or 0,
                     row.get("terra_plans") or 0,
-                    ", ".join(decisions) if decisions else "-",
+                    row.get("first_terra_decision") or "-",
                     "YES" if row.get("final_alerts") else "NO",
                     row.get("diagnosis") or "-",
                 ]
                 for column, value in enumerate(values):
                     cell = QTableWidgetItem(str(value))
-                    if column != 9:
+                    if column != 10:
                         cell.setTextAlignment(Qt.AlignCenter)
                     self.table.setItem(row_index, column, cell)
         finally:
@@ -186,9 +200,13 @@ class MissedOpportunitiesPage(QWidget):
         row = self._rows[row_index]
         blockers = row.get("blockers") or []
         blocker_text = f" | Gate blockers: {', '.join(blockers)}" if blockers else ""
+        setup_time = _display_time(row.get("first_strategy_at")) if row.get("first_strategy_at") else "-"
+        terra_time = _display_time(row.get("first_terra_at")) if row.get("first_terra_at") else "-"
         self.details.setText(
             f"{row.get('ticker') or '-'} | Session #{row.get('session_id') or '-'} | "
-            f"MFE {_pct(row.get('mfe_pct'))}, MAE {_pct(row.get('mae_pct'))}, peak after {_minutes(row.get('time_to_peak_minutes'))}. "
+            f"After HIGH ATTENTION: MFE {_pct(row.get('mfe_pct'))}, MAE {_pct(row.get('mae_pct'))}, peak after {_minutes(row.get('time_to_peak_minutes'))}. "
+            f"First setup {setup_time}: remaining MFE {_pct(row.get('mfe_after_strategy_pct'))}. "
+            f"First Terra {terra_time} ({row.get('first_terra_decision') or '-'}): remaining MFE {_pct(row.get('mfe_after_terra_pct'))}. "
             f"{row.get('reason') or ''}{blocker_text}"
         )
 
@@ -197,7 +215,7 @@ PreviousMainWindow = base.MainWindow
 
 
 class StrategyPipelineMainWindowV6(PreviousMainWindow):
-    """V5 plus momentum missed-opportunity diagnostics."""
+    """V5 plus stage-aware momentum missed-opportunity diagnostics."""
 
     def __init__(self) -> None:
         super().__init__()
