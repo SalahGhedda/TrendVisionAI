@@ -13,9 +13,9 @@ def _now_iso() -> str:
 class OpenAIApiCallStore:
     """Persistent audit log for OpenAI requests made by TrendVisionAI.
 
-    The journal records that a request was attempted and the context needed to
-    understand why it happened. It deliberately does not store API keys, raw
-    prompts, or chart image bytes.
+    The journal records that a request was attempted, the context needed to
+    understand why it happened, and the model's structured response. It never
+    stores API keys, raw prompts, or chart image bytes.
     """
 
     def __init__(self, database_path: str | Path) -> None:
@@ -47,7 +47,8 @@ class OpenAIApiCallStore:
                     status TEXT NOT NULL DEFAULT 'IN PROGRESS',
                     duration_ms INTEGER,
                     decision TEXT,
-                    error_text TEXT NOT NULL DEFAULT ''
+                    error_text TEXT NOT NULL DEFAULT '',
+                    response_text TEXT NOT NULL DEFAULT ''
                 );
                 CREATE INDEX IF NOT EXISTS idx_openai_api_calls_started
                     ON openai_api_calls(started_at DESC, id DESC);
@@ -57,6 +58,13 @@ class OpenAIApiCallStore:
                     ON openai_api_calls(status, started_at DESC);
                 """
             )
+            columns = {
+                row[1] for row in connection.execute("PRAGMA table_info(openai_api_calls)")
+            }
+            if "response_text" not in columns:
+                connection.execute(
+                    "ALTER TABLE openai_api_calls ADD COLUMN response_text TEXT NOT NULL DEFAULT ''"
+                )
 
     def start_call(
         self,
@@ -101,6 +109,7 @@ class OpenAIApiCallStore:
         duration_ms: int | None = None,
         decision: str | None = None,
         error_text: str = "",
+        response_text: str = "",
     ) -> None:
         now = _now_iso()
         with self._connect() as connection:
@@ -108,7 +117,7 @@ class OpenAIApiCallStore:
                 """
                 UPDATE openai_api_calls
                 SET completed_at=?, updated_at=?, status=?, duration_ms=?,
-                    decision=?, error_text=?
+                    decision=?, error_text=?, response_text=?
                 WHERE id=?
                 """,
                 (
@@ -118,6 +127,7 @@ class OpenAIApiCallStore:
                     int(duration_ms) if duration_ms is not None else None,
                     str(decision or "") or None,
                     str(error_text or "")[:1000],
+                    str(response_text or ""),
                     int(call_id),
                 ),
             )
