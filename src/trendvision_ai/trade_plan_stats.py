@@ -189,6 +189,24 @@ class TradePlanStatsEngine:
         if confidence:
             tags.append(f"PLAN CONFIDENCE: {confidence}")
         tags.extend(_setup_family_tags(str(row.get("setup_type") or "")))
+
+        snapshot = row.get("snapshot") or {}
+        strategy = snapshot.get("strategy_context") or {}
+        primary = strategy.get("primary") or {}
+        strategy_id = str(primary.get("strategy_id") or "").strip()
+        family = str(primary.get("family") or "").strip()
+        if strategy_id:
+            tags.append(f"STRATEGY: {strategy_id}")
+        if family:
+            tags.append(f"STRATEGY FAMILY: {family}")
+        score = _num(primary.get("score"))
+        if score is not None:
+            if score >= 85:
+                tags.append("STRATEGY SCORE: 85+")
+            elif score >= 75:
+                tags.append("STRATEGY SCORE: 75-84")
+            else:
+                tags.append("STRATEGY SCORE: 70-74")
         return tags
 
     def tags_for_plan(self, row: dict[str, Any]) -> list[str]:
