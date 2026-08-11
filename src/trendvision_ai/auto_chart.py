@@ -16,8 +16,9 @@ from .market_data import ALPACA_DATA_URL, DEFAULT_FEED
 
 
 AUTO_CHART_LOOKBACK_MINUTES = 60
-AUTO_CHART_LIMIT = 120
+AUTO_CHART_LIMIT = 240
 SESSION_BAR_LIMIT = 1000
+MOMENTUM_BAR_LIMIT = 1000
 MIN_AUTO_CHART_BARS = 5
 NEW_YORK = ZoneInfo("America/New_York")
 
@@ -143,18 +144,34 @@ class AlpacaRecentBarsClient:
         now: datetime | None = None,
         limit: int = SESSION_BAR_LIMIT,
     ) -> list[dict[str, Any]]:
-        """Fetch today's regular-session bars from 09:30 New York through now.
-
-        The live pipeline itself only invokes this during the configured regular
-        session. Returning the full session lets the strategy library inspect the
-        opening range and compute session VWAP without inventing unavailable data.
-        """
+        """Fetch today's regular-session bars from 09:30 New York through now."""
         clock = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
         eastern = clock.astimezone(NEW_YORK)
         session_start = eastern.replace(hour=9, minute=30, second=0, microsecond=0)
         if eastern < session_start:
             return []
         return self._fetch(symbol, start=session_start, end=clock, limit=limit)
+
+    def fetch_momentum_bars(
+        self,
+        symbol: str,
+        *,
+        now: datetime | None = None,
+        limit: int = MOMENTUM_BAR_LIMIT,
+    ) -> list[dict[str, Any]]:
+        """Fetch today's 04:00 New York premarket plus regular-session bars.
+
+        TrendVisionAI still emits actionable trade alerts only during the regular
+        session. The extra bars are context: premarket high/low, gap/drive shape,
+        and early momentum levels that a regular-session trader would commonly
+        keep on the chart.
+        """
+        clock = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
+        eastern = clock.astimezone(NEW_YORK)
+        context_start = eastern.replace(hour=4, minute=0, second=0, microsecond=0)
+        if eastern < context_start:
+            return []
+        return self._fetch(symbol, start=context_start, end=clock, limit=limit)
 
 
 def _price_y(price: float, low: float, high: float, top: float, height: float) -> float:
@@ -209,7 +226,7 @@ def render_candles_png(
 
     count = len(bars)
     slot = chart_width / max(1, count)
-    body_width = max(2.0, min(14.0, slot * 0.58))
+    body_width = max(1.5, min(14.0, slot * 0.58))
     max_volume = max(float(bar.get("volume") or 0.0) for bar in bars) or 1.0
 
     for index, bar in enumerate(bars):
@@ -220,7 +237,7 @@ def render_candles_png(
         c = float(bar["close"])
         up = c >= o
         color = QColor("#23c483" if up else "#ef5b67")
-        painter.setPen(QPen(color, 2))
+        painter.setPen(QPen(color, 1 if slot < 4 else 2))
         painter.drawLine(
             int(x),
             int(_price_y(h, p_low, p_high, top, price_height)),
@@ -230,7 +247,7 @@ def render_candles_png(
         y_open = _price_y(o, p_low, p_high, top, price_height)
         y_close = _price_y(c, p_low, p_high, top, price_height)
         body_top = min(y_open, y_close)
-        body_height = max(2.0, abs(y_close - y_open))
+        body_height = max(1.5, abs(y_close - y_open))
         painter.fillRect(
             QRectF(x - body_width / 2.0, body_top, body_width, body_height),
             color,
@@ -251,7 +268,7 @@ def render_candles_png(
     painter.drawText(
         int(left),
         48,
-        f"Source: Alpaca {feed.upper()} 1-minute bars • no BUY/SELL/SL/TP overlay • partial-venue when feed=IEX",
+        f"Source: Alpaca {feed.upper()} 1-minute bars • premarket may be included • no BUY/SELL/SL/TP overlay • partial-venue when feed=IEX",
     )
     painter.drawText(int(left), 628, f"Bars shown: {len(bars)}")
     painter.end()
