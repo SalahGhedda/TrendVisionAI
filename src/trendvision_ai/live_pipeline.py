@@ -10,8 +10,10 @@ from zoneinfo import ZoneInfo
 from .trade_plan_calibration_v3 import MAX_ACTIONABLE_OBSERVED_SPREAD_PCT
 
 
-PIPELINE_VERSION = 3
+PIPELINE_VERSION = 4
 NEW_YORK = ZoneInfo("America/New_York")
+MIN_RISK_REWARD_TARGET_1 = 1.0
+MIN_RISK_REWARD_TARGET_2 = 2.0
 
 
 def _now() -> datetime:
@@ -265,6 +267,8 @@ def final_trade_alert_gate(
     elif spread_value >= MAX_ACTIONABLE_OBSERVED_SPREAD_PCT:
         blockers.append("SPREAD_TOO_WIDE")
 
+    rr_target_1: float | None = None
+    rr_target_2: float | None = None
     required = ("entry_low", "entry_high", "stop_loss", "target_1", "target_2")
     try:
         values = {key: float(plan.get(key)) for key in required}
@@ -281,6 +285,20 @@ def final_trade_alert_gate(
         )
         if not coherent:
             blockers.append("INCOHERENT_LEVELS")
+        else:
+            # Use the worst price in the proposed entry zone so a wide zone cannot
+            # make a weak plan look better than it is. Targets are never stretched
+            # to satisfy this rule; insufficient natural R/R simply blocks alerting.
+            risk = values["entry_high"] - values["stop_loss"]
+            if risk <= 0:
+                blockers.append("INCOHERENT_LEVELS")
+            else:
+                rr_target_1 = (values["target_1"] - values["entry_high"]) / risk
+                rr_target_2 = (values["target_2"] - values["entry_high"]) / risk
+                if rr_target_1 + 1e-9 < MIN_RISK_REWARD_TARGET_1:
+                    blockers.append("RISK_REWARD_T1_TOO_LOW")
+                if rr_target_2 + 1e-9 < MIN_RISK_REWARD_TARGET_2:
+                    blockers.append("RISK_REWARD_T2_TOO_LOW")
 
         reference = None
         max_extension = None
@@ -290,7 +308,7 @@ def final_trade_alert_gate(
         except (TypeError, ValueError):
             reference = None
             max_extension = None
-        if reference is not None and reference > 0 and max_extension is not None and len(values) == len(required):
+        if reference is not None and reference > 0 and max_extension is not None:
             entry_extension = (values["entry_high"] / reference - 1.0) * 100.0
             if entry_extension > max_extension:
                 blockers.append("STRATEGY_ENTRY_TOO_EXTENDED")
@@ -317,6 +335,10 @@ def final_trade_alert_gate(
         "market_session": session,
         "observed_spread_pct": spread_value,
         "spread_guardrail_pct": MAX_ACTIONABLE_OBSERVED_SPREAD_PCT,
+        "observed_risk_reward_target_1": rr_target_1,
+        "observed_risk_reward_target_2": rr_target_2,
+        "minimum_risk_reward_target_1": MIN_RISK_REWARD_TARGET_1,
+        "minimum_risk_reward_target_2": MIN_RISK_REWARD_TARGET_2,
         "strategy_id": primary.get("strategy_id"),
         "strategy_name": primary.get("name"),
         "setup_instance_key": primary.get("instance_key"),
