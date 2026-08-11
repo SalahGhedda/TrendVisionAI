@@ -9,7 +9,7 @@ if not exist .venv\Scripts\python.exe (
     exit /b 1
 )
 
-.venv\Scripts\python.exe -c "import PySide6, openai, keyring" >nul 2>&1
+.venv\Scripts\python.exe -c "import PySide6, openai, keyring, tzdata" >nul 2>&1
 if errorlevel 1 (
     echo ERROR: Desktop UI dependencies are not installed yet.
     echo Run scripts\setup.bat after git pull.
