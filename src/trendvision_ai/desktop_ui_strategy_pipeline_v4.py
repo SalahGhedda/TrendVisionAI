@@ -9,10 +9,12 @@ from PySide6.QtWidgets import QTableWidgetItem
 
 from . import desktop_ui_calibration_validator as validator_ui
 from . import desktop_ui_market as market_ui
+from . import desktop_ui_stats as calibration_stats_ui
 from . import desktop_ui_strategy_pipeline as strategy_base
 from . import desktop_ui_strategy_pipeline_v3 as current
 from . import desktop_ui_trade_stats as trade_stats_ui
 from .automatic_outcomes import AutomaticOutcomeStore
+from .calibration_stats import CalibrationStatsEngine
 from .performance_outcomes import (
     configure_sqlite_for_desktop,
     install_outcome_performance_patches,
@@ -27,12 +29,47 @@ base = current.base
 CALIBRATION_BACKGROUND_INTERVAL_SECONDS = 60.0
 
 
+_original_feature_snapshot = CalibrationStatsEngine.ensure_feature_snapshot
+
+
+def _cached_feature_snapshot(self: Any, session_id: int) -> dict[str, Any] | None:
+    """Feature snapshots are immutable, so keep decoded copies in memory per engine."""
+    cache = getattr(self, "_perf_feature_cache", None)
+    if not isinstance(cache, dict):
+        cache = {}
+        self._perf_feature_cache = cache
+    key = int(session_id)
+    if key in cache:
+        return cache[key]
+    value = _original_feature_snapshot(self, key)
+    if value is not None:
+        cache[key] = value
+    return value
+
+
+CalibrationStatsEngine.ensure_feature_snapshot = _cached_feature_snapshot
+
+
 def _keep_stats_cache_fresh(engine: Any) -> None:
     cache = getattr(engine, "_perf_stats_cache", None)
     if isinstance(cache, dict):
         # Background refresh owns invalidation/replacement in V4. Prevent the
         # generic short cache TTL from causing a surprise rebuild on the GUI thread.
         cache["built_at"] = time.monotonic()
+
+
+def _event_revision(store: Any, stage: str | None = None) -> tuple[int, int]:
+    try:
+        query = "SELECT COUNT(*), COALESCE(MAX(id), 0) FROM live_pipeline_events"
+        params: tuple[Any, ...] = ()
+        if stage:
+            query += " WHERE stage=?"
+            params = (stage,)
+        with store._connect() as connection:
+            row = connection.execute(query, params).fetchone()
+        return (int(row[0] or 0), int(row[1] or 0))
+    except Exception:
+        return (-1, -1)
 
 
 def _skip_gui_outcome_refresh(self: Any) -> dict[str, int]:
@@ -97,6 +134,36 @@ def _fast_trade_alerts_refresh(self: Any, select_alert_id: int | None = None) ->
     self._perf_render_revision = revision
 
 
+_original_live_pipeline_refresh = strategy_base.StrategyLiveTradePipelinePage.refresh
+
+
+def _fast_live_pipeline_refresh(self: Any) -> None:
+    revision = _event_revision(self.store)
+    if getattr(self, "_perf_event_revision", None) == revision:
+        return
+    self.table.setUpdatesEnabled(False)
+    try:
+        _original_live_pipeline_refresh(self)
+    finally:
+        self.table.setUpdatesEnabled(True)
+    self._perf_event_revision = revision
+
+
+_original_strategy_library_refresh = strategy_base.StrategyLibraryPage.refresh
+
+
+def _fast_strategy_library_refresh(self: Any) -> None:
+    revision = _event_revision(self.store, "STRATEGY_MATCH")
+    if getattr(self, "_perf_strategy_revision", None) == revision:
+        return
+    self.recent.setUpdatesEnabled(False)
+    try:
+        _original_strategy_library_refresh(self)
+    finally:
+        self.recent.setUpdatesEnabled(True)
+    self._perf_strategy_revision = revision
+
+
 _original_trade_stats_refresh = trade_stats_ui.TradePlanStatisticsPage.refresh
 
 
@@ -113,6 +180,11 @@ def _light_trade_stats_refresh(self: Any) -> None:
     self._perf_render_key = key
 
 
+def _light_trade_stats_force_refresh(self: Any) -> None:
+    self._perf_render_key = None
+    self.refresh()
+
+
 _original_validator_refresh = validator_ui.CalibrationValidatorPage.refresh
 
 
@@ -123,11 +195,54 @@ def _light_validator_refresh(self: Any) -> None:
     _original_validator_refresh(self)
 
 
+_original_calibration_stats_refresh = calibration_stats_ui.CalibrationStatisticsPage.refresh
+
+
+def _light_calibration_stats_refresh(self: Any) -> None:
+    """Refresh observational statistics at a human-visible cadence without reclassifying outcomes."""
+    now = time.monotonic()
+    filter_key = (
+        int(self.horizon_combo.currentData() or 15),
+        int(self.minimum_combo.currentData() or 1),
+    )
+    if (
+        getattr(self, "_perf_calibration_filter", None) == filter_key
+        and now - float(getattr(self, "_perf_calibration_rendered_at", 0.0) or 0.0) < 15.0
+    ):
+        return
+    self._last_engine_refresh = now
+    _original_calibration_stats_refresh(self)
+    self._perf_calibration_filter = filter_key
+    self._perf_calibration_rendered_at = now
+
+
+def _light_calibration_force_refresh(self: Any) -> None:
+    self._perf_calibration_rendered_at = 0.0
+    self.refresh()
+
+
+_original_market_page_refresh = market_ui.MarketTrackingPage.refresh
+
+
+def _throttled_market_page_refresh(self: Any) -> None:
+    now = time.monotonic()
+    if now - float(getattr(self, "_perf_market_rendered_at", 0.0) or 0.0) < 12.0:
+        return
+    self._perf_market_rendered_at = now
+    _original_market_page_refresh(self)
+
+
 # These widgets/controllers are constructed during inherited initialization, so
 # patch them before V4 calls super().__init__().
 current.TradeAlertsPage.refresh = _fast_trade_alerts_refresh
+strategy_base.StrategyLiveTradePipelinePage.refresh = _fast_live_pipeline_refresh
+strategy_base.StrategyLibraryPage.refresh = _fast_strategy_library_refresh
 trade_stats_ui.TradePlanStatisticsPage.refresh = _light_trade_stats_refresh
+trade_stats_ui.TradePlanStatisticsPage._force_refresh = _light_trade_stats_force_refresh
 validator_ui.CalibrationValidatorPage.refresh = _light_validator_refresh
+calibration_stats_ui.CalibrationStatisticsPage.refresh = _light_calibration_stats_refresh
+calibration_stats_ui.CalibrationStatisticsPage._force_refresh = _light_calibration_force_refresh
+market_ui.MarketTrackingPage.refresh = _throttled_market_page_refresh
 market_ui.MarketTrackerController._refresh_automatic_outcomes = _skip_gui_outcome_refresh
 
 
@@ -171,9 +286,8 @@ class StrategyPipelineMainWindowV4(current.StrategyPipelineMainWindowV3):
 
         configure_sqlite_for_desktop(self.config.database_path)
 
-        # The underlying market tracker updates at a slower cadence than the old
-        # 2-second UI redraw loop. Five seconds keeps the display responsive while
-        # avoiding needless reconstruction of large tables.
+        # The market tracker updates more slowly than the old 2-second UI loop.
+        # Five seconds keeps the display live without rebuilding large tables constantly.
         self.refresh_timer.setInterval(5000)
 
     def _start_background_calibration_if_due(self) -> bool:
@@ -241,8 +355,7 @@ class StrategyPipelineMainWindowV4(current.StrategyPipelineMainWindowV3):
         _keep_stats_cache_fresh(self.live_qualification.trade_stats)
 
         # Skip V2's synchronous self.live_qualification.refresh() override. The
-        # original strategy pipeline logic is lightweight enough after the DB and
-        # stats-cache optimizations and can consume the last completed snapshot.
+        # original strategy pipeline consumes the last completed background snapshot.
         strategy_base.StrategyPipelineMainWindow._run_live_pipeline(self)
 
     def closeEvent(self, event: Any) -> None:
